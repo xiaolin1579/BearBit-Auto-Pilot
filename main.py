@@ -170,13 +170,12 @@ class QbitNode:
         self.pw = cfg["qb_pass"]
         self.quota_gb = cfg.get("quota_gb", 0)
         self.auth = HTTPBasicAuth(self.user, self.pw) if cfg.get("nginx") else None
-
         self.s = requests.Session()
         self.free_gb = 0
         self.used_gb = 0
-        self.jobs = 0
         self.is_connected = False
-        self.stat_msg = ""
+        self.jobs = 0
+        self.stat_msg = "Active/Total: 0/0"
 
     def login(self):
         try:
@@ -269,7 +268,7 @@ class RtorrentNode:
         self.auth = HTTPBasicAuth(self.user, self.pw)
         self.free_gb, self.is_connected = 0, False
         self.jobs = 0
-        self.stat_msg = ""
+        self.stat_msg = "Active/Total: 0/0"
 
     def login(self):
         try:
@@ -284,6 +283,7 @@ class RtorrentNode:
             soup = BeautifulSoup(requests.post(self.url, data=xml, auth=self.auth, timeout=10, verify=False).text, "xml")
             vals = [v.get_text() for v in soup.find_all("i8")]
             total, active, used_bytes = len(vals)//2, 0, 0
+            self.jobs = total   # ✅ FIX ตัวจริง
             for i in range(0, len(vals), 2):
                 if int(vals[i]) == 1: active += 1
                 used_bytes += int(vals[i+1])
@@ -303,14 +303,12 @@ class RtorrentNode:
             return requests.post(self.url, data=xml, auth=self.auth, timeout=30, verify=False).status_code == 200
         except: return False
 
-    def delete_torrent(self, hash_str):
-        try:
-            # rTorrent ใช้ d.erase เพื่อลบทั้งรายการและไฟล์
-            xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{hash_str}</string></value></param></params></methodCall>'
-            requests.post(self.url, data=xml, auth=self.auth, timeout=10, verify=False)
-            return True
-        except: return False
-
+    def delete_torrent(self, t_hash):
+        # คำสั่ง d.erase คือการลบ Torrent ออกจากรายการ (และลบไฟล์หากตั้งค่าใน rTorrent ไว้)
+        xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{t_hash}</string></value></param></params></methodCall>'
+        res = requests.post(self.url, data=xml, auth=self.auth, verify=False)
+        return res.status_code == 200
+    
 # ========================= AUTO VOTE =========================
 
 def auto_vote_snatched(page):
@@ -361,14 +359,21 @@ class NodeCleaner:
         self.global_cfg = global_clean_cfg or {}
 
     def process(self):
-        # ตรวจสอบว่าระบบถูกเปิดใช้งานหรือไม่ (ลำดับ: Node > Global)
-        is_enabled = self.node_cfg.get('enable')
-        if is_enabled is None: # ถ้าใน Node ไม่ได้ตั้งค่าไว้ ให้ไปดูที่ Global
-            is_enabled = self.global_cfg.get('enable', False)
-        
+
+        node_enable = self.node_cfg.get('enable')
+        global_enable = self.global_cfg.get('enable', False)
+
+        if node_enable is True:
+            is_enabled = True
+        elif node_enable is False:
+            is_enabled = global_enable   # 🔥 fallback ไป global
+        else:
+            is_enabled = global_enable   
+            
         if not is_enabled: return
         
         print(f"🧹 [{self.node.name}] Checking for expired torrents...")
+        send_notify(f"🧹 [{self.node.name}] Checking for expired torrents...")
         
         try:
             if isinstance(self.node, QbitNode):
@@ -377,6 +382,7 @@ class NodeCleaner:
                 self._clean_rtorrent()
         except Exception as e:
             print(f"⚠️ [{self.node.name}] Clean Error: {e}")
+            send_notify(f"⚠️ [{self.node.name}] Clean Error: {e}")
 
     def _clean_qbit(self):
         # ดึงข้อมูลจาก API ของ qBittorrent
@@ -395,37 +401,68 @@ class NodeCleaner:
                 if self.node.delete_torrent(t['hash']):
                     msg = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)"
                     print(msg)
+                    send_notify(msg)
 
     def _clean_rtorrent(self):
         xml = '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>main</string></value></param><param><value><string>d.hash=</string></value></param><param><value><string>d.ratio=</string></value></param><param><value><string>d.timestamp.finished=</string></value></param><param><value><string>d.name=</string></value></param></params></methodCall>'
-        r = requests.post(self.node.url, data=xml, auth=self.node.auth, verify=False, timeout=15)
-        if r.status_code != 200: return
         
-        soup = BeautifulSoup(r.text, "xml")
-        data = [v.get_text() for v in soup.find_all("string")]
-        now = time.time()
-        
-        for i in range(0, len(data), 4):
-            t_hash, t_ratio_raw, t_time, t_name = data[i], data[i+1], data[i+2], data[i+3]
-            ratio = int(t_ratio_raw) / 1000 
-            # ป้องกันกรณีไฟล์ยังไม่เสร็จ (timestamp เป็น 0)
-            t_finish = int(t_time)
-            age_hours = (now - t_finish) / 3600 if t_finish > 0 else 0
+        try:
+            r = requests.post(self.node.url, data=xml, auth=self.node.auth, verify=False, timeout=15)
+            if r.status_code != 200: return
+
+            soup = BeautifulSoup(r.text, "xml")
+            torrent_entries = soup.find('methodResponse').find_all('data')
             
-            if age_hours > 0 and self._should_remove(ratio, age_hours):
-                if self.node.delete_torrent(t_hash):
-                    print(f"   🗑️ Removed: {t_name[:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
+            now = time.time()
+            for entry in torrent_entries:
+                # ดึงค่าเฉพาะชั้นนอกสุด และกรองเอาเฉพาะค่าที่มีข้อมูลจริง
+                vals = [v.get_text().strip() for v in entry.find_all('value', recursive=False)]
+            
+                # ตรวจสอบว่ามีข้อมูลอย่างน้อย 4 ตัว (hash, ratio, finished, name)
+                if len(vals) < 4: 
+                    continue
+            
+                # แก้ไขจุดที่ทำให้ Error: เลือกเฉพาะ 4 ค่าแรกที่ต้องการ
+                t_hash = vals[0]
+                t_ratio_raw = vals[1]
+                t_time_raw = vals[2]
+                t_name = vals[3]
+            
+                # แปลงข้อมูล
+                ratio = int(t_ratio_raw) / 1000 if t_ratio_raw.isdigit() else 0
+                t_finish = int(t_time_raw) if t_time_raw.isdigit() else 0
+            
+                if t_finish <= 0: 
+                    continue
+            
+                age_hours = (now - t_finish) / 3600
+
+                # ใช้งานร่วมกับ _should_remove โดยใช้ค่าจาก config ที่คุณตั้งไว้
+                if self._should_remove(ratio, age_hours):
+                    if self.node.delete_torrent(t_hash):
+                        print(f"🗑️ Removed: {t_name[:40]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
+                        send_notify(f"🗑️ Removed: {t_name[:40]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
+        except Exception as e:
+            print(f"⚠️ Clean Error: {e}")
 
     def _should_remove(self, ratio, age_hours):
         # ลำดับความสำคัญของ Config: Node > Global > Default
+        # หมายเหตุ: ค่า min_time และ max_time ใน config มักเป็นนาที ต้องหาร 60 เพื่อเทียบกับ age_hours
         min_ratio = self.node_cfg.get('min_ratio') or self.global_cfg.get('min_ratio') or 0.5
-        min_time = self.node_cfg.get('min_time') or self.global_cfg.get('min_time') or 360
-        max_time = self.node_cfg.get('max_time') or self.global_cfg.get('max_time') or 720
+        min_time_m = self.node_cfg.get('min_time') or self.global_cfg.get('min_time') or 360
+        max_time_m = self.node_cfg.get('max_time') or self.global_cfg.get('max_time') or 1440
+        
+        # แปลงนาทีเป็นชั่วโมง
+        min_time = min_time_m / 60
+        max_time = max_time_m / 60
         
         # 1. อยู่มานานจนเกิน Max Time (ลบทันที)
-        if age_hours >= max_time: return True
+        if age_hours >= max_time: 
+            return True
+            
         # 2. อยู่เกิน Min Time และ Ratio ถึงเป้า
-        if age_hours >= min_time and ratio >= min_ratio: return True
+        if age_hours >= min_time and ratio >= min_ratio: 
+            return True
         
         return False
         
@@ -458,8 +495,8 @@ def main():
                         node_clean = n_cfg.get('clean_settings', {})
                         cleaner = NodeCleaner(node, node_clean, global_clean)
                         cleaner.process()
-                        
-                        line = f"[{node.name}] 🟢 FREE {node.free_gb:.2f}GB | {node.stat_msg}"
+                        node.refresh_status()
+                        line = f"[{node.name}] 🟢 FREE {getattr(node,'free_gb',0):.2f}GB | {getattr(node,'stat_msg','N/A')}"
                     else:
                         line = f"[{node.name}] ❌ CONNECTION ERROR"
                 except Exception as e:
@@ -472,7 +509,7 @@ def main():
 
             # ✅ ส่งรวมทีเดียว (สำคัญมาก)
             send_notify(
-                "🔌 QB NODE STATUS\n\n" +
+                "🔌 QB/RT NODE STATUS\n\n" +
                 "\n".join(node_status_lines)
             )
 
@@ -557,6 +594,9 @@ def main():
                                 # คัดเลือก Node ที่ว่างที่สุด
                                 active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
                                 target_node, target_cfg = active_nodes[0]
+                                if not active_nodes:
+                                    print("❌ No active nodes available")
+                                    continue
                                 
                                 if target_node.add(r_dl.content, t_size_gb, target_cfg):
                                     msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
