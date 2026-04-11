@@ -164,41 +164,103 @@ def launch_any_browser(p):
 
 class QbitNode:
     def __init__(self, cfg):
-        self.name, self.url = cfg["name"], cfg["url"].rstrip("/")
-        self.user, self.pw = cfg["qb_user"], cfg["qb_pass"]
+        self.name = cfg["name"]
+        self.url = cfg["url"].rstrip("/")
+        self.user = cfg["qb_user"]
+        self.pw = cfg["qb_pass"]
         self.quota_gb = cfg.get("quota_gb", 0)
         self.auth = HTTPBasicAuth(self.user, self.pw) if cfg.get("nginx") else None
+
         self.s = requests.Session()
-        self.free_gb, self.is_connected = 0, False
+        self.free_gb = 0
+        self.used_gb = 0
+        self.jobs = 0
+        self.is_connected = False
         self.stat_msg = ""
 
     def login(self):
         try:
-            r = self.s.post(f"{self.url}/api/v2/auth/login", data={"username": self.user, "password": self.pw}, auth=self.auth, verify=False, timeout=10)
+            r = self.s.post(
+                f"{self.url}/api/v2/auth/login",
+                data={"username": self.user, "password": self.pw},
+                auth=self.auth,
+                verify=False,
+                timeout=10
+            )
             self.is_connected = (r.status_code == 200 and ("Ok." in r.text or r.cookies.get('SID')))
             return self.is_connected
-        except: return False
+        except:
+            return False
 
     def refresh_status(self):
-        if not self.is_connected: return False
+        if not self.is_connected:
+            return False
         try:
-            r_info = self.s.get(f"{self.url}/api/v2/torrents/info", auth=self.auth, verify=False, timeout=10)
-            torrents = r_info.json()
-            active = sum(1 for t in torrents if t['upspeed'] > 0 or t['dlspeed'] > 0)
-            self.stat_msg = f"Active/Total: {active}/{len(torrents)}"
-            used_gb = sum(t.get('total_size', 0) for t in torrents) / (1024**3)
-            r_main = self.s.get(f"{self.url}/api/v2/sync/maindata", auth=self.auth, verify=False, timeout=10)
-            server_free = r_main.json().get('server_state', {}).get('free_space_on_disk', 0) / (1024**3)
-            self.free_gb = min(max(0, self.quota_gb - used_gb), server_free) if self.quota_gb > 0 else server_free
+            # 1. ดึงข้อมูล Torrent ทั้งหมดจาก WebAPI
+            torrents = self.s.get(
+                f"{self.url}/api/v2/torrents/info",
+                auth=self.auth,
+                verify=False,
+                timeout=10
+            ).json()
+
+            # 2. นับจำนวนทั้งหมด และคัดกรองเฉพาะตัวที่กำลังทำงาน (Active)
+            total = len(torrents)
+            # สถานะที่นับว่าเป็น Active: กำลังโหลด, กำลังส่ง, หรือกำลังตรวจสอบไฟล์
+            active_states = ['downloading', 'uploading', 'stalledUP', 'stalledDL', 'starting', 'checkingUP', 'checkingDL']
+            active = sum(1 for t in torrents if t.get('state') in active_states)
+
+            self.jobs = total
+            self.stat_msg = f"Active/Total: {active}/{total}"
+
+            # 3. คำนวณพื้นที่ที่ใช้งานไป (USED) เพื่อใช้ร่วมกับระบบ Quota
+            self.used_gb = sum(t.get('size', 0) for t in torrents) / (1024**3)
+
+            # 4. คำนวณพื้นที่ว่าง (FREE)
+            if self.quota_gb > 0:
+                # กรณีตั้งโควต้าไว้: ใช้ Quota ลบด้วยขนาดไฟล์ทั้งหมดที่มีใน List
+                self.free_gb = max(0, self.quota_gb - self.used_gb)
+            else:
+                # กรณีไม่ได้ตั้งโควต้า: ดึงค่าจาก Disk จริงของเซิร์ฟเวอร์
+                r_main = self.s.get(
+                    f"{self.url}/api/v2/sync/maindata",
+                    auth=self.auth,
+                    verify=False,
+                    timeout=10
+                ).json()
+                disk_free = r_main.get('server_state', {}).get('free_space_on_disk', 0)
+                self.free_gb = disk_free / (1024**3)
+
+            return True
+        except Exception as e:
+            # เก็บ Error ไว้ดูใน console ถ้าเกิดปัญหา
+            print(f"[{self.name}] Refresh Status Error: {e}")
+            return False
+
+    def add(self, content, size=None, n_cfg=None): # เพิ่ม parameter ให้รองรับ 3 ตัว
+        try:
+            r = self.s.post(
+                f"{self.url}/api/v2/torrents/add",
+                files={"torrents": ("f.torrent", content)},
+                data={"paused": "false"},
+                auth=self.auth,
+                verify=False,
+                timeout=30
+            )
+            return r.status_code == 200
+        except:
+            return False
+
+    def delete_torrent(self, hash_str):
+        try:
+            self.s.post(
+                f"{self.url}/api/v2/torrents/delete",
+                data={"hashes": hash_str, "deleteFiles": "true"},
+                auth=self.auth, verify=False, timeout=10
+            )
             return True
         except: return False
-
-    def add(self, content, size, n_cfg):
-        try:
-            r = self.s.post(f"{self.url}/api/v2/torrents/add", files={"torrents": ("f.torrent", content)}, data={"paused": "false"}, auth=self.auth, verify=False, timeout=30)
-            return r.status_code == 200
-        except: return False
-
+            
 class RtorrentNode:
     def __init__(self, cfg):
         self.name, self.url = cfg["name"], cfg["url"].rstrip("/")
@@ -206,6 +268,7 @@ class RtorrentNode:
         self.quota_gb = cfg.get("quota_gb", 0)
         self.auth = HTTPBasicAuth(self.user, self.pw)
         self.free_gb, self.is_connected = 0, False
+        self.jobs = 0
         self.stat_msg = ""
 
     def login(self):
@@ -233,11 +296,19 @@ class RtorrentNode:
             return True
         except: return False
 
-    def add(self, content, size, n_cfg):
+    def add(self, content, size=None, n_cfg=None): # ปรับให้เหมือนกัน
         try:
             b64 = base64.b64encode(content).decode('utf-8')
             xml = f'<?xml version="1.0"?><methodCall><methodName>load.raw_start</methodName><params><param><value><string></string></value></param><param><value><base64>{b64}</base64></value></param></params></methodCall>'
             return requests.post(self.url, data=xml, auth=self.auth, timeout=30, verify=False).status_code == 200
+        except: return False
+
+    def delete_torrent(self, hash_str):
+        try:
+            # rTorrent ใช้ d.erase เพื่อลบทั้งรายการและไฟล์
+            xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{hash_str}</string></value></param></params></methodCall>'
+            requests.post(self.url, data=xml, auth=self.auth, timeout=10, verify=False)
+            return True
         except: return False
 
 # ========================= AUTO VOTE =========================
@@ -281,6 +352,83 @@ def click_thanks(page, torrent_id):
         print(f"     ⚠️ ไม่สามารถกดขอบคุณได้: {e}")
         return False
         
+# ========================= AUTO CLEAN =========================
+
+class NodeCleaner:
+    def __init__(self, node_obj, node_clean_cfg, global_clean_cfg):
+        self.node = node_obj
+        self.node_cfg = node_clean_cfg or {}
+        self.global_cfg = global_clean_cfg or {}
+
+    def process(self):
+        # ตรวจสอบว่าระบบถูกเปิดใช้งานหรือไม่ (ลำดับ: Node > Global)
+        is_enabled = self.node_cfg.get('enable')
+        if is_enabled is None: # ถ้าใน Node ไม่ได้ตั้งค่าไว้ ให้ไปดูที่ Global
+            is_enabled = self.global_cfg.get('enable', False)
+        
+        if not is_enabled: return
+        
+        print(f"🧹 [{self.node.name}] Checking for expired torrents...")
+        
+        try:
+            if isinstance(self.node, QbitNode):
+                self._clean_qbit()
+            elif isinstance(self.node, RtorrentNode):
+                self._clean_rtorrent()
+        except Exception as e:
+            print(f"⚠️ [{self.node.name}] Clean Error: {e}")
+
+    def _clean_qbit(self):
+        # ดึงข้อมูลจาก API ของ qBittorrent
+        r = self.node.s.get(f"{self.node.url}/api/v2/torrents/info", 
+                            auth=self.node.auth, verify=False, timeout=15)
+        if r.status_code != 200: return
+        
+        torrents = r.json()
+        now = time.time()
+        for t in torrents:
+            ratio = t.get('ratio', 0)
+            added_on = t.get('added_on', 0)
+            age_hours = (now - added_on) / 3600
+            
+            if self._should_remove(ratio, age_hours):
+                if self.node.delete_torrent(t['hash']):
+                    msg = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)"
+                    print(msg)
+
+    def _clean_rtorrent(self):
+        xml = '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>main</string></value></param><param><value><string>d.hash=</string></value></param><param><value><string>d.ratio=</string></value></param><param><value><string>d.timestamp.finished=</string></value></param><param><value><string>d.name=</string></value></param></params></methodCall>'
+        r = requests.post(self.node.url, data=xml, auth=self.node.auth, verify=False, timeout=15)
+        if r.status_code != 200: return
+        
+        soup = BeautifulSoup(r.text, "xml")
+        data = [v.get_text() for v in soup.find_all("string")]
+        now = time.time()
+        
+        for i in range(0, len(data), 4):
+            t_hash, t_ratio_raw, t_time, t_name = data[i], data[i+1], data[i+2], data[i+3]
+            ratio = int(t_ratio_raw) / 1000 
+            # ป้องกันกรณีไฟล์ยังไม่เสร็จ (timestamp เป็น 0)
+            t_finish = int(t_time)
+            age_hours = (now - t_finish) / 3600 if t_finish > 0 else 0
+            
+            if age_hours > 0 and self._should_remove(ratio, age_hours):
+                if self.node.delete_torrent(t_hash):
+                    print(f"   🗑️ Removed: {t_name[:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
+
+    def _should_remove(self, ratio, age_hours):
+        # ลำดับความสำคัญของ Config: Node > Global > Default
+        min_ratio = self.node_cfg.get('min_ratio') or self.global_cfg.get('min_ratio') or 0.5
+        min_time = self.node_cfg.get('min_time') or self.global_cfg.get('min_time') or 360
+        max_time = self.node_cfg.get('max_time') or self.global_cfg.get('max_time') or 720
+        
+        # 1. อยู่มานานจนเกิน Max Time (ลบทันที)
+        if age_hours >= max_time: return True
+        # 2. อยู่เกิน Min Time และ Ratio ถึงเป้า
+        if age_hours >= min_time and ratio >= min_ratio: return True
+        
+        return False
+        
 # ========================= MAIN LOOP =========================
 
 def main():
@@ -290,23 +438,43 @@ def main():
     
     while True:
         try:
-            CFG = load_full_config(); SET = CFG.get('SETTING', {})
+            CFG = load_full_config(); SET = CFG.get('SETTING', {}); global_clean = CFG.get('GLOBAL_CLEAN', {})
             seen_ids, seen_hashes = load_data(SEEN_FILE), load_data(HASH_SEEN_FILE)
             active_nodes = []
+            node_status_lines = []
+            # 1. เชื่อมต่อโหนด
+            print("\n🔌 QB/RTฺ NODE STATUS (START)\n")
 
-            # 1. เชื่อมต่อ Nodes
             for n_cfg in CFG['NODES']:
-                node = RtorrentNode(n_cfg) if n_cfg.get("type") == "rtorrent" else QbitNode(n_cfg)
-                if node.login() and node.refresh_status():
-                    active_nodes.append((node, n_cfg))
-                    status_line = f"🟢 {node.name}: {node.free_gb:.1f}GB Free | {node.stat_msg}"
-                    print(status_line)
-                    send_notify(status_line)
+                if not n_cfg.get('enable'): continue # ข้ามถ้า Node ถูกปิดใช้งาน
 
-            if not active_nodes:
-                print("⚠️ No active nodes found. Waiting 60s...")
-                send_notify("⚠️ No active nodes found. Waiting 60s...")
-                time.sleep(60); continue
+                node = RtorrentNode(n_cfg) if n_cfg.get("type") == "rtorrent" else QbitNode(n_cfg)
+
+                try:
+                    if node.login() and node.refresh_status():
+                        active_nodes.append((node, n_cfg))
+                        
+                        # ระบบ Auto Clean
+                        node_clean = n_cfg.get('clean_settings', {})
+                        cleaner = NodeCleaner(node, node_clean, global_clean)
+                        cleaner.process()
+                        
+                        line = f"[{node.name}] 🟢 FREE {node.free_gb:.2f}GB | {node.stat_msg}"
+                    else:
+                        line = f"[{node.name}] ❌ CONNECTION ERROR"
+                except Exception as e:
+                    line = f"[{node.name}] ⚠️ CRITICAL ERROR: {e}"
+                    
+                print(line)
+                node_status_lines.append(line)
+
+            print("\n🔌 QB/RT NODE STATUS (END)\n")
+
+            # ✅ ส่งรวมทีเดียว (สำคัญมาก)
+            send_notify(
+                "🔌 QB NODE STATUS\n\n" +
+                "\n".join(node_status_lines)
+            )
 
             # 2. เริ่มสแกน Browser
             with sync_playwright() as p:
@@ -377,7 +545,7 @@ def main():
                             r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
                             if r_dl.status_code == 200:
                                 t_hash = extract_info_hash(r_dl.content)
-                                if t_hash in seen_hashes: 
+                                if t_hash and t_hash in seen_hashes: 
                                     print(f"     ❌ ข้าม: พบ Hash ซ้ำในระบบ (ไฟล์เดียวกัน)")
                                     seen_ids.add(t_id); skipped_count += 1; continue
                                 
@@ -387,14 +555,15 @@ def main():
                                 time.sleep(random.uniform(0.5, 1.2)) # รอจังหวะเล็กน้อยเหมือนคนกด
                                 
                                 # คัดเลือก Node ที่ว่างที่สุด
-                                active_nodes.sort(key=lambda x: x[0].free_gb, reverse=True)
+                                active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
                                 target_node, target_cfg = active_nodes[0]
                                 
                                 if target_node.add(r_dl.content, t_size_gb, target_cfg):
                                     msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
                                     send_notify(msg); print(f"     {msg}")
                                     seen_ids.add(t_id)
-                                    if t_hash: seen_hashes.add(t_hash)
+                                    if t_hash:
+                                        seen_hashes.add(t_hash)
                                     added_count += 1
                             
                             if added_count >= SET.get('MAX_NEW_PER_ZONE', 5): 
