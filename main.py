@@ -28,7 +28,7 @@ def handle_exit(sig, frame):
     print(f"\n{stop_msg}")
     try: send_notify(stop_msg)
     except: pass
-    sys.exit(0)
+    os._exit(0)
 
 signal.signal(signal.SIGINT, handle_exit)
 signal.signal(signal.SIGTERM, handle_exit)
@@ -352,13 +352,20 @@ class NodeCleaner:
         return res
 
     def _should_remove(self, ratio, age_hours):
-        # ลำดับความสำคัญของ Config: Node > Global > Default
-        # หมายเหตุ: ค่า min_time และ max_time ใน config มักเป็นนาที ต้องหาร 60 เพื่อเทียบกับ age_hours
-        # ดึงค่าจาก Node ถ้าไม่มีให้ไป Global ถ้าไม่มีอีกให้ใช้ Default
-        min_ratio = self.node_cfg.get('min_ratio', self.global_cfg.get('min_ratio', 0.5))
-        min_time_m = self.node_cfg.get('min_time', self.global_cfg.get('min_time', 360))
-        max_time_m = self.node_cfg.get('max_time', self.global_cfg.get('max_time', 1440))
+        #ตรวจสอบว่า Node มีการตั้งค่าเฉพาะตัวและเปิดใช้งานอยู่หรือไม่
+        use_node_cfg = self.node_cfg.get('enable', False)
         
+        if use_node_cfg:
+            # ถ้า Node เปิดอยู่: ใช้ค่าจาก Node (ถ้าไม่มีค่าใน Node ให้ใช้ Default)
+            min_ratio = self.node_cfg.get('min_ratio', 0.5)
+            min_time_m = self.node_cfg.get('min_time', 360)
+            max_time_m = self.node_cfg.get('max_time', 1440)
+        else:
+            # ถ้า Node ปิดอยู่: บังคับไปใช้ Global (ถ้าไม่มี Global ให้ใช้ Default)
+            min_ratio = self.global_cfg.get('min_ratio', 0.5)
+            min_time_m = self.global_cfg.get('min_time', 360)
+            max_time_m = self.global_cfg.get('max_time', 1440)        
+
         # แปลงนาทีเป็นชั่วโมง
         min_time = min_time_m / 60
         max_time = max_time_m / 60
