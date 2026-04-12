@@ -1,77 +1,93 @@
 {
-  "BEARBIT": {
-    "username": "YOUR_BEARBIT_USERNAME",
-    "password": "YOUR_BEARBIT_PASSWORD",
-    "target_urls": [
-      "https://bearbit.org/torrents.php?type=free",
-      "https://bearbit.org/torrents.php?cat=401",
-      "https://bearbit.org/torrents.php?cat=405",
-      "https://bearbit.org/torrents.php?cat=404",
-      "https://bearbit.org/torrents.php?cat=402"
-    ]
-  },
-  "NODES": [
-    {
-      "name": "VPS_Main_qBit",
-      "type": "qbit",
-      "url": "http://1.2.3.4:8080",
-      "qb_user": "admin",
-      "qb_pass": "adminadmin",
-      "quota_gb": 100,
-      "nginx": false,
-      "enable": true,
-      "clean_settings": {
-        "enable": false,
-        "min_ratio": 0.5,
-        "min_time": 120,
-        "max_time": 720
-    },
-    {
-      "name": "Seedbox_rTorrent",
-      "type": "rtorrent",
-      "url": "https://your-seedbox.com/rpc",
-      "rt_user": "myuser",
-      "rt_pass": "mypassword",
-      "quota_gb": 0,
-      "nginx": true,
-      "enable": true,
-      "clean_settings": {
-        "enable": false,
-        "min_ratio": 0.5,
-        "min_time": 120,
-        "max_time": 720
-      }
-    }
-  ],
-  "TELEGRAM_CONFIG": {
-    "notify_enable": false,
-    "main_bot_token": "123456789:ABCDefghIJKLmnop-MAIN",
-    "chat_id": "987654321",
-    "remote_enable": false,
-    "remote_bot_token": "987654321:XYZAbcdeFGHIjklm-REMOTE"
-  },
-  "LINE_CONFIG": {
-    "enable": false,
-    "access_token": "YOUR_LINE_NOTIFY_TOKEN_HERE"
-  },
-  "DISCORD_CONFIG": {
-    "enable": false,
-    "webhook_url": "https://discord.com/api/webhooks/...",
-    "admin_id": "123456789012345678"
-  },
-  "SETTING": {
-    "MIN_SIZE_GB": 1.0,
-    "MAX_SIZE_GB": 800.0,
-    "FREELOAD_ENABLE": true,
-    "MIN_FREE_PERCENT": 100,
-    "MAX_NEW_PER_ZONE": 5,
-    "MIN_WAIT_MINUTES": 5,
-    "MAX_WAIT_MINUTES": 15
-  },
-  "GLOBAL_CLEAN": {
-    "enable": true,
-    "min_ratio": 1.0,
-    "min_time": 360,
-    "max_time": 1440
-  }
+	"BEARBIT": 
+	{
+		"username": "YOUR_BEARBIT_USERNAME",
+		"password": "YOUR_BEARBIT_PASSWORD",
+		"target_urls": 
+		[
+			{
+				"name": "โซนพิเศษ",
+				"url": "https://bearbit.org/viewbrsb.php",
+				"enable": true
+			},
+			{
+				"name": "โซนปกติ (No 18+)",
+				"url": "https://bearbit.org/viewno18sbx.php",
+				"enable": true
+			}
+		]
+	},
+	"NODES": 
+	[
+		{
+			"name": "VPS_Main_qBit",
+			"type": "qbit",
+			"url": "http://1.2.3.4:8080",
+			"qb_user": "admin",
+			"qb_pass": "adminadmin",
+			"quota_gb": 100,
+			"nginx": false,
+			"enable": true,
+			"clean_settings": 
+			{
+				"enable": false,
+				"min_ratio": 0.5,
+				"min_time": 120,
+				"max_time": 720
+			}
+		},
+		{
+			"name": "Seedbox_rTorrent",
+			"type": "rtorrent",
+			"url": "https://your-seedbox.com/rpc",
+			"rt_user": "myuser",
+			"rt_pass": "mypassword",
+			"quota_gb": 0,
+			"nginx": true,
+			"enable": true,
+			"clean_settings": 
+			{
+				"enable": false,
+				"min_ratio": 0.5,
+				"min_time": 120,
+				"max_time": 720
+			}
+		}
+	],
+	"TELEGRAM_CONFIG": 
+	{
+		"notify_enable": false,
+		"main_bot_token": "123456789:ABCDefghIJKLmnop-MAIN",
+		"chat_id": "987654321",
+		"remote_enable": false,
+		"remote_bot_token": "987654321:XYZAbcdeFGHIjklm-REMOTE"
+	},
+	"LINE_CONFIG": 
+	{
+		"enable": false,
+		"access_token": "YOUR_LINE_NOTIFY_TOKEN_HERE"
+	},
+	"DISCORD_CONFIG": 
+	{
+		"enable": false,
+		"webhook_url": "https://discord.com/api/webhooks/...",
+		"admin_id": "123456789012345678"
+	},
+	"SETTING": 
+	{
+		"MIN_SIZE_GB": 1.0,
+		"MAX_SIZE_GB": 800.0,
+		"FREELOAD_ENABLE": true,
+		"MIN_FREE_PERCENT": 100,
+		"MAX_NEW_PER_ZONE": 5,
+		"MIN_WAIT_MINUTES": 5,
+		"MAX_WAIT_MINUTES": 15
+	},
+	"GLOBAL_CLEAN": 
+	{
+		"enable": true,
+		"min_ratio": 1.0,
+		"min_time": 360,
+		"max_time": 1440
+	}
 }
