@@ -137,7 +137,7 @@ def handle_msg(message):
             bot.send_message(message.chat.id, "🚀 เปิดบอทหลักเรียบร้อย")
 
     elif message.text == '🚫 Stop Main Bot':
-        os.system("pkill -9 -f 'python3 main.py'")
+        os.system("pkill -15 -f 'python3 main.py'")
         bot.send_message(message.chat.id, "🛑 หยุดบอทหลักเรียบร้อย")
 
     elif message.text == '🔄 Restart Remote':
