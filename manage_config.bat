@@ -5,9 +5,10 @@ setlocal enabledelayedexpansion
 :menu
 cls
 echo ======================================================
-echo    BearBit Config Manager (Press Enter to Skip)
+echo    BearBit Config Manager (Full System)
 echo ======================================================
-echo  1) Setup Account
+:: ใช้ ^& เพื่อป้องกัน Batch เข้าใจผิดว่าเป็นคำสั่งใหม่
+echo  1) Setup Account ^& Zone Management
 echo  2) Notification
 echo  3) Filter Settings
 echo  4) Global Auto-Clean Settings
@@ -26,11 +27,60 @@ goto menu
 
 :account
 cls
-echo --- Account Setup ---
-set "u=" & set /p u="Username: "
-set "p=" & set /p p="Password: "
-python -c "import json; d=json.load(open('config.json', encoding='utf-8')); if '%u%': d['BEARBIT']['username']='%u%'; if '%p%': d['BEARBIT']['password']='%p%'; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
-goto menu
+echo ======================================================
+echo          Account Setup ^& Zone Management
+echo ======================================================
+echo  1) Edit Username/Password
+echo  2) Toggle Search Zones (ON/OFF)
+echo  3) Back to Main Menu
+echo ======================================================
+set "acc_choice=" & set /p acc_choice="Select [1-3]: "
+
+if "%acc_choice%"=="1" goto edit_auth
+if "%acc_choice%"=="2" goto target_loop
+if "%acc_choice%"=="3" goto menu
+goto account
+
+:edit_auth
+cls
+echo --- Edit Username/Password ---
+set "u=" & set /p u="New Username (Enter to skip): "
+set "p=" & set /p p="New Password (Enter to skip): "
+
+:: แก้ไข Syntax Python ให้ทำงานได้จริงบนบรรทัดเดียว
+python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); u=os.getenv('u'); p=os.getenv('p'); d['BEARBIT']['username']=u if u else d['BEARBIT']['username']; d['BEARBIT']['password']=p if p else d['BEARBIT']['password']; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
+echo ✅ Update Account Complete!
+pause
+goto account
+
+:target_loop
+:: บังคับให้หน้าจอรองรับภาษาไทย (UTF-8)
+chcp 65001 >nul
+cls
+echo ======================================================
+echo             Target URL Management
+echo ======================================================
+
+:: 1. ตรวจสอบและบังคับใช้โครงสร้าง URL ที่ถูกต้อง (Fix 404 URL)
+python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); old = d['BEARBIT'].get('target_urls', [{},{}]); d['BEARBIT']['target_urls'] = [ {'name': 'โซนพิเศษ', 'url': 'https://bearbit.org/viewbrsb.php', 'enable': old[0].get('enable', True) if len(old) > 0 else True}, {'name': 'โซนปกติ (No 18+)', 'url': 'https://bearbit.org/viewno18sbx.php', 'enable': old[1].get('enable', True) if len(old) > 1 else True} ]; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
+
+:: 2. แสดงรายการสถานะปัจจุบัน (ใช้ sys.stdout เพื่อคุม encoding)
+python -c "import json, sys; d=json.load(open('config.json', encoding='utf-8')); [sys.stdout.buffer.write(f'{i}: [{\"ON \" if u.get(\"enable\") else \"OFF\"}] {u.get(\"name\")}\n'.encode('utf-8')) for i, u in enumerate(d['BEARBIT']['target_urls'])]"
+
+echo --------------------------
+echo  t) Toggle Enable/Disable ^| b) Back
+set /p t_op="Select action: "
+
+if /i "%t_op%"=="b" goto account
+if /i "%t_op%"=="t" (
+    set /p t_idx="Enter Index to Toggle (0 or 1): "
+    if not defined t_idx goto target_loop
+    
+    :: 3. สลับสถานะ ON/OFF
+    python -c "import json, os; idx_str=os.getenv('t_idx'); d=json.load(open('config.json', encoding='utf-8')); urls=d['BEARBIT']['target_urls']; idx=int(idx_str) if (idx_str and idx_str.isdigit() and int(idx_str) < len(urls)) else None; (urls.__setitem__(idx, {**urls[idx], 'enable': not urls[idx]['enable']}) or json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)) if idx is not None else print('Invalid Index')"
+    goto target_loop
+)
+goto account
 
 :notify
 cls
@@ -38,7 +88,7 @@ echo --- Notification ---
 set "t_en=" & set /p t_en="Enable Telegram (true/false): "
 set "t_token=" & set /p t_token="Bot Token: "
 set "t_id=" & set /p t_id="Chat ID: "
-python -c "import json; d=json.load(open('config.json', encoding='utf-8')); c=d['TELEGRAM_CONFIG']; if '%t_en%': c['notify_enable']=(True if '%t_en%'.lower()=='true' else False); if '%t_token%': c['main_bot_token']='%t_token%'; if '%t_id%': c['chat_id']='%t_id%'; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
+python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); c=d['TELEGRAM_CONFIG']; t_en=os.getenv('t_en'); t_token=os.getenv('t_token'); t_id=os.getenv('t_id'); c['notify_enable']=(t_en.lower()=='true') if t_en else c['notify_enable']; c['main_bot_token']=t_token if t_token else c['main_bot_token']; c['chat_id']=t_id if t_id else c['chat_id']; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
 goto menu
 
 :filter
@@ -51,11 +101,7 @@ set "F_VAL=0"
 if /i "%F_EN%"=="y" (
     set /p F_VAL="Min Free %% (e.g. 50): "
 )
-
-:: ใช้เทคนิค os.environ เพื่อดึงค่าจาก Batch อย่างปลอดภัย
-python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); s=d['SETTING']; m_s=os.getenv('MIN_S'); m_a=os.getenv('MAX_S'); f_e=os.getenv('F_EN'); f_v=os.getenv('F_VAL'); s['MIN_SIZE_GB']=float(m_s) if m_s else s.get('MIN_SIZE_GB', 15.0); s['MAX_SIZE_GB']=float(m_a) if m_a else s.get('MAX_SIZE_GB', 150.0); s['FREELOAD_ENABLE']=(True if f_e.lower()=='y' else False) if f_e else s.get('FREELOAD_ENABLE', True); s['MIN_FREE_PERCENT']=int(f_v) if f_v!='0' else s.get('MIN_FREE_PERCENT', 0); json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
-
-echo.
+python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); s=d['SETTING']; m_s=os.getenv('MIN_S'); m_a=os.getenv('MAX_S'); f_e=os.getenv('F_EN'); f_v=os.getenv('F_VAL'); s['MIN_SIZE_GB']=float(m_s) if m_s else s.get('MIN_SIZE_GB', 15.0); s['MAX_SIZE_GB']=float(m_a) if m_a else s.get('MAX_SIZE_GB', 150.0); s['FREELOAD_ENABLE']=(True if f_e and f_e.lower()=='y' else False) if f_e else s.get('FREELOAD_ENABLE', True); s['MIN_FREE_PERCENT']=int(f_v) if f_v!='0' else s.get('MIN_FREE_PERCENT', 0); json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
 echo ✅ Update Complete!
 pause
 goto menu

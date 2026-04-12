@@ -25,7 +25,7 @@ while true; do
     echo "======================================================"
     echo "       BearBit Config Manager (Full System)"
     echo "======================================================"
-    echo "1) Setup Account"
+    echo "1) Setup Account & Zone Management"
     echo "2) Notification"
     echo "3) Filter Settings"
     echo "4) Global Clean Settings"
@@ -35,14 +35,85 @@ while true; do
     read -p "Select [1-6]: " choice
 
     case $choice in
-        1)
-            read -p "Username: " u; read -p "Password: " p
-            export U_VAL="$u" P_VAL="$p"
-            update_json "
+1)
+            while true; do
+                clear
+                echo -e "${GREEN}==========================================${NC}"
+                echo -e "       Account & Search Zone Management"
+                echo -e "${GREEN}==========================================${NC}"
+                echo "1) Edit Username & Password"
+                echo "2) Toggle Search Zones (ON/OFF)"
+                echo "3) Back to Main Menu"
+                echo "------------------------------------------"
+                read -p "Select option [1-3]: " acc_opt
+
+                case $acc_opt in
+                    1)
+                        # --- เมนูตั้งค่า Account ---
+                        echo -e "\n[ Edit Account ]"
+                        read -p "   New Username (Enter to skip): " u
+                        read -p "   New Password (Enter to skip): " p
+                        export U_VAL="$u" P_VAL="$p"
+                        update_json "
 u=os.getenv('U_VAL'); p=os.getenv('P_VAL')
 if u: d['BEARBIT']['username']=u
-if p: d['BEARBIT']['password']=p" ;;
+if p: d['BEARBIT']['password']=p"
+                        echo -e "${GREEN}✅ Account updated.${NC}"
+                        sleep 1
+                        ;;
+                    
+                    2)
+                        # --- เมนูเปิด/ปิด โซนหาไฟล์ ---
+                        while true; do
+                            clear
+                            echo -e "${GREEN}==========================================${NC}"
+                            echo -e "         Target Zone Management"
+                            echo -e "${GREEN}==========================================${NC}"
+                            
+                            # ตรวจสอบและบังคับใช้โครงสร้าง URL ล่าสุดเพื่อป้องกัน 404
+                            update_json "
+d['BEARBIT']['target_urls'] = [
+    {'name': 'โซนพิเศษ', 'url': 'https://bearbit.org/viewbrsb.php', 'enable': d['BEARBIT'].get('target_urls', [{}])[0].get('enable', True)},
+    {'name': 'โซนปกติ (No 18+)', 'url': 'https://bearbit.org/viewno18sbx.php', 'enable': d['BEARBIT'].get('target_urls', [{},{}])[1].get('enable', True)}
+]"
 
+                            # แสดงรายการโซน (รองรับภาษาไทย)
+                            export PYTHONIOENCODING=utf-8
+                            python3 -c "
+import json, sys
+with open('config.json', 'r', encoding='utf-8') as f:
+    d = json.load(f)
+    for i, u in enumerate(d['BEARBIT'].get('target_urls', []), 1):
+        status = '🟢 ON ' if u.get('enable') else '🔴 OFF'
+        sys.stdout.buffer.write(f'   {i}. {status} | {u.get(\"name\")}\n'.encode('utf-8'))
+"
+                            echo "------------------------------------------"
+                            echo "t) Toggle Status | b) Back to Account Menu"
+                            read -p "Select action: " t_opt
+                            
+                            if [[ "$t_opt" == "t" ]]; then
+                                read -p "   Enter Number to Toggle (1-2): " t_num
+                                if [[ "$t_num" =~ ^[0-9]+$ ]]; then
+                                    export T_IDX=$((t_num-1))
+                                    update_json "
+import os
+idx = int(os.getenv('T_IDX'))
+urls = d['BEARBIT'].get('target_urls', [])
+if 0 <= idx < len(urls):
+    urls[idx]['enable'] = not urls[idx]['enable']
+"
+                                fi
+                            elif [[ "$t_opt" == "b" ]]; then
+                                break
+                            fi
+                        done
+                        ;;
+                    
+                    3) break ;;
+                    *) echo "Invalid option" ; sleep 1 ;;
+                esac
+            done
+            ;;
 2)
             while true; do
                 echo "--- Notification Settings ---"
