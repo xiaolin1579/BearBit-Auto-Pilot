@@ -14,9 +14,10 @@ import shutil
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+import functools
+print = functools.partial(print, flush=True)
 
 def handle_exit(sig, frame):
-    # กำหนดเหตุผลตามสัญญาณที่ได้รับ
     reasons = {
         signal.SIGINT: "User Interrupted (Ctrl+C)",
         signal.SIGHUP: "Terminal Closed (SIGHUP)",
@@ -24,25 +25,19 @@ def handle_exit(sig, frame):
     }
     reason = reasons.get(sig, f"Signal {sig}")
     stop_msg = f"🛑 BearBit Auto-Pilot : Stopped\nReason: {reason}"
-    
     print(f"\n{stop_msg}")
-    try:
-        send_notify(stop_msg)
-    except:
-        pass
+    try: send_notify(stop_msg)
+    except: pass
     sys.exit(0)
 
-# ลงทะเบียนสัญญาณต่างๆ
-signal.signal(signal.SIGINT, handle_exit)   # Ctrl+C
-signal.signal(signal.SIGTERM, handle_exit)  # pkill / kill
+signal.signal(signal.SIGINT, handle_exit)
+signal.signal(signal.SIGTERM, handle_exit)
 if sys.platform != "win32":
-    signal.signal(signal.SIGHUP, handle_exit)   # ปิดหน้าจอ Shell (เฉพาะ Linux/Mac)
-    # บังคับ Encoding สำหรับ Windows
+    signal.signal(signal.SIGHUP, handle_exit)
     import codecs
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer)
 
 urllib3.disable_warnings()
-
 
 # ========================= CONFIGURATION =========================
 
@@ -61,44 +56,29 @@ def load_full_config():
 def send_notify(msg):
     """ส่งแจ้งเตือนผ่าน LINE, Telegram และ Discord"""
     cfg = load_full_config()
+    msg = msg.strip()
     
     # 1. LINE Notify
     line_cfg = cfg.get('LINE_CONFIG', {})
-    if line_cfg.get('enable'):
-        token = line_cfg.get('access_token')
-        if token:
-            try: requests.post('https://notify-api.line.me/api/notify', headers={'Authorization': f'Bearer {token}'}, data={'message': msg.strip()}, timeout=10)
-            except: pass
+    if line_cfg.get('enable') and line_cfg.get('access_token'):
+        try: requests.post('https://notify-api.line.me/api/notify', headers={'Authorization': f"Bearer {line_cfg.get('access_token')}"}, data={'message': msg}, timeout=10)
+        except: pass
 
     # 2. Telegram Bot
     tele_cfg = cfg.get('TELEGRAM_CONFIG', {})
-    if tele_cfg.get('notify_enable'):
-        t_token = tele_cfg.get('main_bot_token')
-        t_id = tele_cfg.get('chat_id')
-        if t_token and t_id:
-            try: requests.post(f"https://api.telegram.org/bot{t_token}/sendMessage", json={'chat_id': t_id, 'text': msg.strip(), 'parse_mode': 'HTML'}, timeout=10)
-            except: pass
+    if tele_cfg.get('notify_enable') and tele_cfg.get('main_bot_token') and tele_cfg.get('chat_id'):
+        try: requests.post(f"https://api.telegram.org/bot{tele_cfg.get('main_bot_token')}/sendMessage", json={'chat_id': tele_cfg.get('chat_id'), 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
+        except: pass
 
-    # 3. Discord Webhook [เพิ่มใหม่]
+    # 3. Discord Webhook
     disc_cfg = cfg.get('DISCORD_CONFIG', {})
-    if disc_cfg.get('enable'):
-        webhook_url = disc_cfg.get('webhook_url')
-        if webhook_url:
-            try:
-                # ดึง ID ของ Admin มาจาก Config (ถ้ามี)
-                admin_id = disc_cfg.get('admin_id', '').strip()
-                
-                # ถ้ามี ID ให้เตรียมรูปแบบการ Mention <@ID>
-                mention = f"<@{admin_id}> " if admin_id else ""
-                
-                # ตกแต่งข้อความ: เอา Mention วางไว้หน้าสุดเพื่อให้ระบบแจ้งเตือนถึงตัวบุคคล
-                payload = {
-                    "content": f"{mention}**[BearBit Notification]**\n{msg.strip()}"
-                }
-                
-                requests.post(webhook_url, json=payload, timeout=10)
-            except: 
-                pass
+    if disc_cfg.get('enable') and disc_cfg.get('webhook_url'):
+        try:
+            admin_id = disc_cfg.get('admin_id', '').strip()
+            mention = f"<@{admin_id}> " if admin_id else ""
+            payload = {"content": f"{mention}**[BearBit Notification]**\n{msg}"}
+            requests.post(disc_cfg.get('webhook_url'), json=payload, timeout=10)
+        except: pass
 
 def load_data(path):
     if not os.path.exists(path): return set()
@@ -154,7 +134,6 @@ def launch_any_browser(p):
     info = get_universal_browser()
     common_args = ["--no-sandbox", "--disable-gpu", "--mute-audio"]
     if not info: return p.chromium.launch(headless=True, args=common_args), "Default Playwright"
-    
     if info["type"] == "chromium":
         return p.chromium.launch(executable_path=info["path"], headless=True, args=common_args + ["--disable-dev-shm-usage"]), info["path"]
     else:
@@ -164,102 +143,52 @@ def launch_any_browser(p):
 
 class QbitNode:
     def __init__(self, cfg):
-        self.name = cfg["name"]
-        self.url = cfg["url"].rstrip("/")
-        self.user = cfg["qb_user"]
-        self.pw = cfg["qb_pass"]
+        self.name, self.url = cfg["name"], cfg["url"].rstrip("/")
+        self.user, self.pw = cfg["qb_user"], cfg["qb_pass"]
         self.quota_gb = cfg.get("quota_gb", 0)
         self.auth = HTTPBasicAuth(self.user, self.pw) if cfg.get("nginx") else None
         self.s = requests.Session()
         self.free_gb = 0
-        self.used_gb = 0
         self.is_connected = False
         self.jobs = 0
         self.stat_msg = "Active/Total: 0/0"
 
     def login(self):
         try:
-            r = self.s.post(
-                f"{self.url}/api/v2/auth/login",
-                data={"username": self.user, "password": self.pw},
-                auth=self.auth,
-                verify=False,
-                timeout=10
-            )
+            r = self.s.post(f"{self.url}/api/v2/auth/login", data={"username": self.user, "password": self.pw}, auth=self.auth, verify=False, timeout=10)
             self.is_connected = (r.status_code == 200 and ("Ok." in r.text or r.cookies.get('SID')))
             return self.is_connected
-        except:
-            return False
+        except: return False
 
     def refresh_status(self):
-        if not self.is_connected:
-            return False
+        if not self.is_connected: return False
         try:
-            # 1. ดึงข้อมูล Torrent ทั้งหมดจาก WebAPI
-            torrents = self.s.get(
-                f"{self.url}/api/v2/torrents/info",
-                auth=self.auth,
-                verify=False,
-                timeout=10
-            ).json()
-
-            # 2. นับจำนวนทั้งหมด และคัดกรองเฉพาะตัวที่กำลังทำงาน (Active)
+            torrents = self.s.get(f"{self.url}/api/v2/torrents/info", auth=self.auth, verify=False, timeout=10).json()
             total = len(torrents)
-            # สถานะที่นับว่าเป็น Active: กำลังโหลด, กำลังส่ง, หรือกำลังตรวจสอบไฟล์
             active_states = ['downloading', 'uploading', 'stalledUP', 'stalledDL', 'starting', 'checkingUP', 'checkingDL']
             active = sum(1 for t in torrents if t.get('state') in active_states)
-
             self.jobs = total
             self.stat_msg = f"Active/Total: {active}/{total}"
-
-            # 3. คำนวณพื้นที่ที่ใช้งานไป (USED) เพื่อใช้ร่วมกับระบบ Quota
-            self.used_gb = sum(t.get('size', 0) for t in torrents) / (1024**3)
-
-            # 4. คำนวณพื้นที่ว่าง (FREE)
-            if self.quota_gb > 0:
-                # กรณีตั้งโควต้าไว้: ใช้ Quota ลบด้วยขนาดไฟล์ทั้งหมดที่มีใน List
-                self.free_gb = max(0, self.quota_gb - self.used_gb)
+            used_gb = sum(t.get('size', 0) for t in torrents) / (1024**3)
+            if self.quota_gb > 0: self.free_gb = max(0, self.quota_gb - used_gb)
             else:
-                # กรณีไม่ได้ตั้งโควต้า: ดึงค่าจาก Disk จริงของเซิร์ฟเวอร์
-                r_main = self.s.get(
-                    f"{self.url}/api/v2/sync/maindata",
-                    auth=self.auth,
-                    verify=False,
-                    timeout=10
-                ).json()
-                disk_free = r_main.get('server_state', {}).get('free_space_on_disk', 0)
-                self.free_gb = disk_free / (1024**3)
-
+                r_main = self.s.get(f"{self.url}/api/v2/sync/maindata", auth=self.auth, verify=False, timeout=10).json()
+                self.free_gb = r_main.get('server_state', {}).get('free_space_on_disk', 0) / (1024**3)
             return True
-        except Exception as e:
-            # เก็บ Error ไว้ดูใน console ถ้าเกิดปัญหา
-            print(f"[{self.name}] Refresh Status Error: {e}")
-            return False
+        except: return False
 
-    def add(self, content, size=None, n_cfg=None): # เพิ่ม parameter ให้รองรับ 3 ตัว
+    def add(self, content, size=None, n_cfg=None):
         try:
-            r = self.s.post(
-                f"{self.url}/api/v2/torrents/add",
-                files={"torrents": ("f.torrent", content)},
-                data={"paused": "false"},
-                auth=self.auth,
-                verify=False,
-                timeout=30
-            )
+            r = self.s.post(f"{self.url}/api/v2/torrents/add", files={"torrents": ("f.torrent", content)}, data={"paused": "false"}, auth=self.auth, verify=False, timeout=30)
             return r.status_code == 200
-        except:
-            return False
+        except: return False
 
     def delete_torrent(self, hash_str):
         try:
-            self.s.post(
-                f"{self.url}/api/v2/torrents/delete",
-                data={"hashes": hash_str, "deleteFiles": "true"},
-                auth=self.auth, verify=False, timeout=10
-            )
+            self.s.post(f"{self.url}/api/v2/torrents/delete", data={"hashes": hash_str, "deleteFiles": "true"}, auth=self.auth, verify=False, timeout=10)
             return True
         except: return False
-            
+
 class RtorrentNode:
     def __init__(self, cfg):
         self.name, self.url = cfg["name"], cfg["url"].rstrip("/")
@@ -273,7 +202,8 @@ class RtorrentNode:
     def login(self):
         try:
             r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, timeout=10, verify=False)
-            self.is_connected = (r.status_code == 200); return self.is_connected
+            self.is_connected = (r.status_code == 200)
+            return self.is_connected
         except: return False
 
     def refresh_status(self):
@@ -283,7 +213,7 @@ class RtorrentNode:
             soup = BeautifulSoup(requests.post(self.url, data=xml, auth=self.auth, timeout=10, verify=False).text, "xml")
             vals = [v.get_text() for v in soup.find_all("i8")]
             total, active, used_bytes = len(vals)//2, 0, 0
-            self.jobs = total   # ✅ FIX ตัวจริง
+            self.jobs = total
             for i in range(0, len(vals), 2):
                 if int(vals[i]) == 1: active += 1
                 used_bytes += int(vals[i+1])
@@ -296,7 +226,7 @@ class RtorrentNode:
             return True
         except: return False
 
-    def add(self, content, size=None, n_cfg=None): # ปรับให้เหมือนกัน
+    def add(self, content, size=None, n_cfg=None):
         try:
             b64 = base64.b64encode(content).decode('utf-8')
             xml = f'<?xml version="1.0"?><methodCall><methodName>load.raw_start</methodName><params><param><value><string></string></value></param><param><value><base64>{b64}</base64></value></param></params></methodCall>'
@@ -304,52 +234,11 @@ class RtorrentNode:
         except: return False
 
     def delete_torrent(self, t_hash):
-        # คำสั่ง d.erase คือการลบ Torrent ออกจากรายการ (และลบไฟล์หากตั้งค่าใน rTorrent ไว้)
-        xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{t_hash}</string></value></param></params></methodCall>'
-        res = requests.post(self.url, data=xml, auth=self.auth, verify=False)
-        return res.status_code == 200
-    
-# ========================= AUTO VOTE =========================
+        try:
+            xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{t_hash}</string></value></param></params></methodCall>'
+            return requests.post(self.url, data=xml, auth=self.auth, verify=False, timeout=10).status_code == 200
+        except: return False
 
-def auto_vote_snatched(page):
-    try:
-        max_p = 5
-        print(f"🗳️ เริ่มระบบโหวตอัตโนมัติ (จำกัด {max_p} หน้า)")
-        send_notify(f"🗳️ เริ่มระบบโหวตอัตโนมัติ (จำกัด {max_p} หน้า)")
-        page.goto("https://bearbit.org/snatchdown.php", wait_until="networkidle")
-        for p_idx in range(1, max_p + 1):
-            vote_targets = page.locator('img[title="ยอดเยี่ยม"], img[src*="v5.1.1.png"]')
-            count = vote_targets.count()
-            if count > 0:
-                for i in range(count):
-                    try: vote_targets.first.click(); time.sleep(random.uniform(1.0, 2.0))
-                    except: continue
-                print(f"📄 หน้า {p_idx}: โหวตเรียบร้อย {count} รายการ")
-            else:
-                print(f"📄 หน้า {p_idx}: ไม่มีรายการให้โหวต")
-            
-            next_btn = page.locator('img[src*="nextpage.gif"]').first
-            if next_btn.is_visible() and p_idx < max_p: 
-                next_btn.click(); time.sleep(2)
-            else: break
-        print("🎊 จบการทำงานระบบโหวตประจำรอบ")
-        send_notify("🎊 จบการทำงานระบบโหวตประจำรอบ")
-    except Exception as e: print(f"❌ ระบบโหวตขัดข้อง: {e}")
-
-# ========================= AUTO THANKS =========================
-
-def click_thanks(page, torrent_id):
-    """สั่งรัน JavaScript เพื่อกดขอบคุณตาม ID ของ Torrent"""
-    try:
-        # สั่งรันฟังก์ชัน sndReq ของทางเว็บโดยตรง
-        page.evaluate(f"sndReq('action=say_thanks&id={torrent_id}', 'saythanks')")
-        print(f"     🙏 ให้กำลังใจ: กด 'ขอบคุณ' เรียบร้อย (ID: {torrent_id})")
-        send_notify(f"     🙏 ให้กำลังใจ: กด 'ขอบคุณ' เรียบร้อย (ID: {torrent_id})")
-        return True
-    except Exception as e:
-        print(f"     ⚠️ ไม่สามารถกดขอบคุณได้: {e}")
-        return False
-        
 # ========================= AUTO CLEAN =========================
 
 class NodeCleaner:
@@ -359,7 +248,6 @@ class NodeCleaner:
         self.global_cfg = global_clean_cfg or {}
 
     def process(self):
-
         node_enable = self.node_cfg.get('enable')
         global_enable = self.global_cfg.get('enable', False)
 
@@ -371,79 +259,88 @@ class NodeCleaner:
             is_enabled = global_enable   
             
         if not is_enabled: return
-        
+
         print(f"🧹 [{self.node.name}] Checking for expired torrents...")
-        send_notify(f"🧹 [{self.node.name}] Checking for expired torrents...")
-        
         try:
-            if isinstance(self.node, QbitNode):
-                self._clean_qbit()
-            elif isinstance(self.node, RtorrentNode):
-                self._clean_rtorrent()
+            removed_list = []
+            if isinstance(self.node, QbitNode): removed_list = self._clean_qbit()
+            elif isinstance(self.node, RtorrentNode): removed_list = self._clean_rtorrent()
+            
+            if removed_list:
+                msg = f"🧹 [{self.node.name}] Cleanup Summary:\n" + "\n".join(removed_list)
+                send_notify(msg)
         except Exception as e:
             print(f"⚠️ [{self.node.name}] Clean Error: {e}")
-            send_notify(f"⚠️ [{self.node.name}] Clean Error: {e}")
 
     def _clean_qbit(self):
-        # ดึงข้อมูลจาก API ของ qBittorrent
-        r = self.node.s.get(f"{self.node.url}/api/v2/torrents/info", 
-                            auth=self.node.auth, verify=False, timeout=15)
-        if r.status_code != 200: return
-        
+        res = []
+        r = self.node.s.get(f"{self.node.url}/api/v2/torrents/info", auth=self.node.auth, verify=False, timeout=15)
+        if r.status_code != 200: return []
         torrents = r.json()
         now = time.time()
         for t in torrents:
             ratio = t.get('ratio', 0)
             added_on = t.get('added_on', 0)
             age_hours = (now - added_on) / 3600
-            
             if self._should_remove(ratio, age_hours):
                 if self.node.delete_torrent(t['hash']):
-                    msg = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)"
-                    print(msg)
-                    send_notify(msg)
+                    line = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)"
+                    print(line); res.append(line)
+        return res
 
     def _clean_rtorrent(self):
+        res = []
+        # XML query สำหรับดึงข้อมูลที่จำเป็น
         xml = '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>main</string></value></param><param><value><string>d.hash=</string></value></param><param><value><string>d.ratio=</string></value></param><param><value><string>d.timestamp.finished=</string></value></param><param><value><string>d.name=</string></value></param></params></methodCall>'
         
         try:
             r = requests.post(self.node.url, data=xml, auth=self.node.auth, verify=False, timeout=15)
-            if r.status_code != 200: return
+            if r.status_code != 200:
+                print(f"⚠️ [{self.node.name}] Connection Error: HTTP {r.status_code}")
+                return []
 
             soup = BeautifulSoup(r.text, "xml")
-            torrent_entries = soup.find('methodResponse').find_all('data')
-            
+            # ความเสถียรสูง: เจาะจงไปที่ methodResponse ตามมาตรฐาน XML-RPC
+            response = soup.find('methodResponse')
+            if not response:
+                return []
+                
+            torrent_entries = response.find_all('data')
             now = time.time()
+
             for entry in torrent_entries:
-                # ดึงค่าเฉพาะชั้นนอกสุด และกรองเอาเฉพาะค่าที่มีข้อมูลจริง
+                # ดึงค่าเฉพาะชั้นนอกสุดเพื่อป้องกันข้อมูลปนกัน
                 vals = [v.get_text().strip() for v in entry.find_all('value', recursive=False)]
-            
-                # ตรวจสอบว่ามีข้อมูลอย่างน้อย 4 ตัว (hash, ratio, finished, name)
-                if len(vals) < 4: 
+                
+                # ตรวจสอบความครบถ้วนของข้อมูล (Hash, Ratio, Finished, Name)
+                if len(vals) < 4:
                     continue
-            
-                # แก้ไขจุดที่ทำให้ Error: เลือกเฉพาะ 4 ค่าแรกที่ต้องการ
+                
                 t_hash = vals[0]
-                t_ratio_raw = vals[1]
-                t_time_raw = vals[2]
+                # แปลง Ratio: rTorrent ส่งมาเป็น 1/1000 (เช่น 1500 คือ 1.5)
+                ratio = int(vals[1]) / 1000 if vals[1].isdigit() else 0
+                t_finish = int(vals[2]) if vals[2].isdigit() else 0
                 t_name = vals[3]
-            
-                # แปลงข้อมูล
-                ratio = int(t_ratio_raw) / 1000 if t_ratio_raw.isdigit() else 0
-                t_finish = int(t_time_raw) if t_time_raw.isdigit() else 0
-            
-                if t_finish <= 0: 
+
+                # กรองเฉพาะไฟล์ที่โหลดเสร็จแล้วเท่านั้น
+                if t_finish <= 0:
                     continue
-            
+
                 age_hours = (now - t_finish) / 3600
 
-                # ใช้งานร่วมกับ _should_remove โดยใช้ค่าจาก config ที่คุณตั้งไว้
+                # ตรวจสอบเงื่อนไขการลบตาม Config
                 if self._should_remove(ratio, age_hours):
                     if self.node.delete_torrent(t_hash):
-                        print(f"🗑️ Removed: {t_name[:40]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
-                        send_notify(f"🗑️ Removed: {t_name[:40]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)")
+                        # ความสวยงาม: รายละเอียดชัดเจนแต่กระชับ
+                        line = f"  - 🗑️ {t_name[:35]}... (R:{ratio:.2f}, Age:{age_hours:.1f}h)"
+                        print(line)
+                        res.append(line)
+
         except Exception as e:
-            print(f"⚠️ Clean Error: {e}")
+            # Error Handling: พิมพ์สาเหตุออกมาให้ทราบ
+            print(f"⚠️ [{self.node.name}] rTorrent Clean Error: {str(e)}")
+            
+        return res
 
     def _should_remove(self, ratio, age_hours):
         # ลำดับความสำคัญของ Config: Node > Global > Default
@@ -465,158 +362,196 @@ class NodeCleaner:
             return True
         
         return False
-        
-# ========================= MAIN LOOP =========================
+
+# ========================= MAIN FUNCTIONS =========================
+
+def auto_vote_snatched(page):
+    try:
+        max_p = 5
+        print(f"🗳️ Vote system started ({max_p} pages)")
+        page.goto("https://bearbit.org/snatchdown.php", wait_until="networkidle")
+        for p_idx in range(1, max_p + 1):
+            vote_targets = page.locator('img[title="ยอดเยี่ยม"], img[src*="v5.1.1.png"]')
+            count = vote_targets.count()
+            if count > 0:
+                for i in range(count):
+                    try: vote_targets.first.click(); time.sleep(random.uniform(1.0, 1.5))
+                    except: continue
+            next_btn = page.locator('img[src*="nextpage.gif"]').first
+            if next_btn.is_visible() and p_idx < max_p: next_btn.click(); time.sleep(2)
+            else: break
+        send_notify("🗳️ Vote session completed.")
+    except Exception as e: print(f"❌ Vote Error: {e}")
 
 def main():
     startup_msg = "🚀 BearBit Auto-Pilot : Started"
-    print(startup_msg)
-    send_notify(startup_msg)
+    print(startup_msg); send_notify(startup_msg)
     
     while True:
         try:
-            CFG = load_full_config(); SET = CFG.get('SETTING', {}); global_clean = CFG.get('GLOBAL_CLEAN', {})
-            seen_ids, seen_hashes = load_data(SEEN_FILE), load_data(HASH_SEEN_FILE)
+            CFG = load_full_config()
+            SET = CFG.get('SETTING', {})
+            global_clean = CFG.get('GLOBAL_CLEAN', {})
+            seen_ids = load_data(SEEN_FILE)
+            seen_hashes = load_data(HASH_SEEN_FILE)
             active_nodes = []
-            node_status_lines = []
-            # 1. เชื่อมต่อโหนด
-            print("\n🔌 QB/RTฺ NODE STATUS (START)\n")
+            node_status_buffer = []
 
+            # 1. Node Section (Checking & Cleanup)
+            print("\n🔌 NODE STATUS CHECKING...")
             for n_cfg in CFG['NODES']:
-                if not n_cfg.get('enable'): continue # ข้ามถ้า Node ถูกปิดใช้งาน
-
+                if not n_cfg.get('enable'): continue
                 node = RtorrentNode(n_cfg) if n_cfg.get("type") == "rtorrent" else QbitNode(n_cfg)
+                if node.login():
+                    NodeCleaner(node, n_cfg.get('clean_settings', {}), global_clean).process()
+                    time.sleep(2)
+                    node.refresh_status()
+                    active_nodes.append((node, n_cfg))
+                    icon = "🟢"
+                else: icon = "❌"
+                line = f"{icon} [{node.name}] FREE {getattr(node,'free_gb',0):.1f}GB | {getattr(node,'stat_msg','N/A')}"
+                print(line); node_status_buffer.append(line)
+            
+            if node_status_buffer:
+                send_notify("🔌 **Node Status Report**\n" + "\n".join(node_status_buffer))
 
-                try:
-                    if node.login() and node.refresh_status():
-                        active_nodes.append((node, n_cfg))
-                        
-                        # ระบบ Auto Clean
-                        node_clean = n_cfg.get('clean_settings', {})
-                        cleaner = NodeCleaner(node, node_clean, global_clean)
-                        cleaner.process()
-                        node.refresh_status()
-                        line = f"[{node.name}] 🟢 FREE {getattr(node,'free_gb',0):.2f}GB | {getattr(node,'stat_msg','N/A')}"
-                    else:
-                        line = f"[{node.name}] ❌ CONNECTION ERROR"
-                except Exception as e:
-                    line = f"[{node.name}] ⚠️ CRITICAL ERROR: {e}"
-                    
-                print(line)
-                node_status_lines.append(line)
-
-            print("\n🔌 QB/RT NODE STATUS (END)\n")
-
-            # ✅ ส่งรวมทีเดียว (สำคัญมาก)
-            send_notify(
-                "🔌 QB/RT NODE STATUS\n\n" +
-                "\n".join(node_status_lines)
-            )
-
-            # 2. เริ่มสแกน Browser
+            # 2. Browser Section
             with sync_playwright() as p:
-                browser, b_path = launch_any_browser(p)
-                context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                browser, browser_path = launch_any_browser(p)
+                context = browser.new_context(user_agent="Mozilla/5.0...")
                 page = context.new_page()
-                page.goto("https://bearbit.org/login.php")
-                page.fill('input[name="username"]', CFG['BEARBIT']['username'])
-                page.fill('input[name="password"]', CFG['BEARBIT']['password'])
-                page.click('input[type="submit"]'); time.sleep(2)
-
-                if "logout.php" in page.content():
-                    print("🔑 Bearbit Login: Success")
-                    send_notify("🔑 Bearbit Login: Success")
-                    auto_vote_snatched(page)
-                    
-                    filter_info = f"⚙️ เงื่อนไข: ขนาด {SET.get('MIN_SIZE_GB', 0)}-{SET.get('MAX_SIZE_GB', 999)}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'} ({SET.get('MIN_FREE_PERCENT', 0)}%)"
-                    print(filter_info)
-                    send_notify(filter_info)
-
-                    dl_session = requests.Session()
-                    dl_session.cookies.update({c['name']: c['value'] for c in context.cookies()})
-
-                    for target_url in CFG['BEARBIT']['target_urls']:
-                        u_name = target_url.split('/')[-1]
-                        print(f"🌐 Scanning: {target_url}")
-                        send_notify(f"🌐 Scanning: {target_url}")
-                        page.goto(target_url); soup = BeautifulSoup(page.content(), "html.parser")
-                        added_count = 0; skipped_count = 0
-                        
-                        # ค้นหาแถวรายการ Torrent
-                        rows = soup.find_all("tr")
-                        for row in rows:
-                            # ดึงลิงก์และชื่อไฟล์
-                            link_tag = row.find("a", href=re.compile(r"details\.php\?id=\d+"))
-                            dl_link_tag = row.find("a", href=re.compile(r"download(new)?\.php\?id=\d+"))
-                            
-                            if not dl_link_tag or not link_tag: continue
-                            
-                            t_name = link_tag.get_text().strip()
-                            t_id = re.search(r'id=(\d+)', dl_link_tag['href']).group(1)
-                            
-                            # แสดง Log เริ่มต้นการตรวจสอบไฟล์
-                            print(f"  🔍 Checking: {t_name[:60]}...")
-
-                            # 1. ตรวจสอบว่าเคยเพิ่มไปหรือยัง
-                            if t_id in seen_ids: 
-                                print(f"     ❌ ข้าม: เคยเพิ่มไปแล้ว (ID: {t_id})")
-                                skipped_count += 1; continue
-
-                            # 2. ตรวจสอบขนาดไฟล์
-                            t_size_gb = 0
-                            for cell in row.find_all("td"):
-                                if re.search(r"\d+\s*(GB|MB|TB)", cell.get_text(), re.I):
-                                    t_size_gb = parse_size(cell.get_text()); break
-                            
-                            if not (SET.get('MIN_SIZE_GB', 0) <= t_size_gb <= SET.get('MAX_SIZE_GB', 999)):
-                                print(f"     ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข")
-                                skipped_count += 1; continue
-
-                            # 3. ตรวจสอบสถานะ Freeload
-                            free_p = check_freeload_status(row) if SET.get('FREELOAD_ENABLE') else 100
-                            if free_p < SET.get('MIN_FREE_PERCENT', 0):
-                                print(f"     ❌ ข้าม: ฟรีโหลด {free_p}% น้อยกว่าที่กำหนด")
-                                skipped_count += 1; continue
-                            
-                            # 4. ตรวจสอบ Info Hash (ป้องกันไฟล์ซ้ำคนละ ID)
-                            r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
-                            if r_dl.status_code == 200:
-                                t_hash = extract_info_hash(r_dl.content)
-                                if t_hash and t_hash in seen_hashes: 
-                                    print(f"     ❌ ข้าม: พบ Hash ซ้ำในระบบ (ไฟล์เดียวกัน)")
-                                    seen_ids.add(t_id); skipped_count += 1; continue
-                                
-                                # [เพิ่มใหม่] กดขอบคุณก่อนส่งไฟล์เข้า Node
-                                # เราใช้ page เดิมที่เปิด target_url อยู่ในการกด
-                                click_thanks(page, t_id)
-                                time.sleep(random.uniform(0.5, 1.2)) # รอจังหวะเล็กน้อยเหมือนคนกด
-                                
-                                # คัดเลือก Node ที่ว่างที่สุด
-                                active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
-                                target_node, target_cfg = active_nodes[0]
-                                if not active_nodes:
-                                    print("❌ No active nodes available")
-                                    continue
-                                
-                                if target_node.add(r_dl.content, t_size_gb, target_cfg):
-                                    msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
-                                    send_notify(msg); print(f"     {msg}")
-                                    seen_ids.add(t_id)
-                                    if t_hash:
-                                        seen_hashes.add(t_hash)
-                                    added_count += 1
-                            
-                            if added_count >= SET.get('MAX_NEW_PER_ZONE', 5): 
-                                print(f"  ⚠️ หยุดสแกนโซนนี้: ครบโควตา {added_count} ไฟล์แล้ว")
-                                send_notify(f"  ⚠️ หยุดสแกนโซนนี้: ครบโควตา {added_count} ไฟล์แล้ว")
-                                break
-                        
-                        summary_msg = f"📊 สรุป {u_name}: เพิ่มใหม่ {added_count} | ข้าม {skipped_count}"
-                        print(summary_msg); send_notify(summary_msg)
-                        save_data(SEEN_FILE, seen_ids); save_data(HASH_SEEN_FILE, seen_hashes)
                 
+                def safe_goto(url, retries=3):
+                    for i in range(retries):
+                        try:
+                            if page.is_closed(): return False
+                            # เปลี่ยนเป็น networkidle เพื่อความชัวร์ว่าโหลดปุ่มต่างๆ มาครบ
+                            page.goto(url, wait_until="networkidle", timeout=60000)
+                            return True
+                        except Exception as e:
+                            print(f"⚠️ Retry {i+1}: {e}")
+                            time.sleep(5)
+                    return False
+
+                # --- Login ---
+                if safe_goto("https://bearbit.org/login.php"):
+                    page.fill('input[name="username"]', CFG['BEARBIT']['username'])
+                    page.fill('input[name="password"]', CFG['BEARBIT']['password'])
+                    page.click('input[type="submit"]')
+                    time.sleep(3)
+
+                    if "logout.php" in page.content():
+                        print("🔑 Login Success")
+                        auto_vote_snatched(page) # โหวตครั้งเดียวตอนเริ่มรอบ
+                        
+                        
+                        dl_session = requests.Session()
+                        dl_session.cookies.update({c['name']: c['value'] for c in context.cookies()})
+
+                        # --- วนลูปสแกนแต่ละโซน (Target URLs) ---
+                        for target_item in CFG['BEARBIT'].get('target_urls', []):
+                            if page.is_closed(): break 
+
+                            # 1. เตรียมข้อมูลโซน
+                            if isinstance(target_item, dict):
+                                if not target_item.get('enable', True): continue
+                                target_url = target_item.get('url')
+                                display_zone = target_item.get('name', "Zone")
+                            else:
+                                target_url, display_zone = target_item, "Zone"
+
+                            print(f"\n🌐 Scanning: [{display_zone}]")
+                            print(f"⚙️ เงื่อนไข: ขนาด {SET.get('MIN_SIZE_GB', 0)}-{SET.get('MAX_SIZE_GB', 999)}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}")
+                        
+                            if not safe_goto(target_url): continue
+                            
+                            soup = BeautifulSoup(page.content(), "html.parser")
+                            added_in_zone = [] # เก็บ msg รายการที่เพิ่มสำเร็จ
+                            count_skip = 0    # นับจำนวนที่ข้าม
+                        
+                            # ดึงรายการ Torrent
+                            all_details = soup.find_all("a", href=re.compile(r"details(new)?\.php\?id=\d+"))
+                            rows = list(dict.fromkeys([a.find_parent("tr") for a in all_details if not a.find("img") and len(a.get_text(strip=True)) > 5]))
+                            
+                            # --- วนลูปรายไฟล์ในโซน ---
+                            for row in rows:
+                                if not row or not ("download" in str(row).lower() or "free" in str(row).lower()): continue
+                                link_tag = row.find("a", href=re.compile(r"details\.php\?id=\d+"))
+                                dl_link_tag = row.find("a", href=re.compile(r"download(new)?\.php\?id=\d+"))
+                                if not dl_link_tag or not link_tag: continue
+                            
+                                t_id = re.search(r'id=(\d+)', dl_link_tag.get('href', '')).group(1)
+                                t_name = re.sub(r'(Auto Sticky:|Sticky:|HOT Torrents|\[FREE\]|\[HOT\]|\n|\t)', '', link_tag.get_text()).strip()
+                                t_size_gb = parse_size(row.get_text(separator=" "))
+
+                                print(f"  🔍 Checking: {t_name[:50]}... (ID: {t_id})")
+
+                                # เช็คเงื่อนไขต่างๆ (Seen, Size, Free)
+                                if t_id in seen_ids:
+                                    print(f"      ❌ ข้าม: เคยเพิ่มไปแล้ว"); count_skip += 1; continue
+                            
+                                if not (SET.get('MIN_SIZE_GB', 0) <= t_size_gb <= SET.get('MAX_SIZE_GB', 999)):
+                                    print(f"      ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข"); count_skip += 1; continue
+                            
+                                free_p = 100 if any(x in str(row) for x in ["pic/s-free.gif", "pic/s-x2.gif", "x2", "x6", "Free"]) else check_freeload_status(row)
+                                if SET.get('FREELOAD_ENABLE') and free_p < SET.get('MIN_FREE_PERCENT', 0):
+                                    print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด"); count_skip += 1; continue
+
+                                # ดาวน์โหลดและเพิ่มเข้า Node
+                                r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
+                                if r_dl.status_code == 200:
+                                    t_hash = extract_info_hash(r_dl.content)
+                                    if t_hash and t_hash in seen_hashes:
+                                        print(f"      ❌ ข้าม: Hash ซ้ำในระบบ"); seen_ids.add(t_id); count_skip += 1; continue
+                                
+                                    # กดขอบคุณ
+                                    page.evaluate(f"sndReq('action=say_thanks&id={t_id}', 'saythanks')")
+                                
+                                    # เลือก Node ที่ว่างที่สุด
+                                    active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
+                                    if active_nodes:
+                                        node_obj, _ = active_nodes[0]
+                                        if node_obj.add(r_dl.content):
+                                            success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
+                                            print(success_msg)
+                                            added_in_zone.append(success_msg)
+                                            seen_ids.add(t_id)
+                                            if t_hash: seen_hashes.add(t_hash)
+
+                                # เช็คโควตาต่อโซน
+                                if len(added_in_zone) >= SET.get('MAX_NEW_PER_ZONE', 5): 
+                                    print(f"  ⚠️ ครบโควตา {len(added_in_zone)} ไฟล์แล้ว")
+                                    break
+
+                            # ======================================================
+                            # 📊 สรุปหลังจบแต่ละโซน (อยู่นอก Row loop แต่อยู่ใน Zone loop)
+                            # ======================================================
+                            if len(added_in_zone) > 0 or count_skip > 0:
+                                summary_msg = (
+                                    f"⚙️ **เงื่อนไข:** ขนาด {SET.get('MIN_SIZE_GB', 0):.1f}-{SET.get('MAX_SIZE_GB', 999):.1f}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}\n"
+                                    f"🌐 **Scanning:** [{display_zone}] {target_url}\n\n"
+                                )
+
+                                if added_in_zone:
+                                    summary_msg += "\n".join(added_in_zone) + "\n\n"
+                                else:
+                                    summary_msg += "❌ ไม่มีไฟล์เข้าเงื่อนไข\n\n"             
+                                    
+                                footer = f"📊 **สรุป {display_zone}:** เพิ่มใหม่ {len(added_in_zone)} | ข้าม {count_skip}"
+                                summary_msg += footer
+                            
+                                print(f"\n{footer}") # แสดงในหน้าจอ
+                                send_notify(summary_msg) # ส่งแจ้งเตือนทีเดียว
+                            # ======================================================
+
+                        # บันทึกข้อมูลหลังจบ "ทุกโซน" 
+                        save_data(SEEN_FILE, seen_ids)
+                        save_data(HASH_SEEN_FILE, seen_hashes)
+                
+                # ปิด Browser เมื่อรันครบทุกโซนแล้วเท่านั้น
                 browser.close()
 
+            # จบรอบ เข้าสู่ช่วงพัก
             wait_sec = random.randint(SET.get('MIN_WAIT_MINUTES', 2)*60, SET.get('MAX_WAIT_MINUTES', 10)*60)
             wait_msg = f"💤 Cycle finished. Waiting {wait_sec//60} minutes for next scan..."
             print(f"{wait_msg}")
@@ -629,9 +564,7 @@ def main():
             print("")
 
         except Exception as e:
-            print(f"❌ Error: {e}")
-            send_notify(f"❌ Error in loop: {e}") # แจ้งเตือน error ภายใน loop ด้วย
-            time.sleep(10)
-            
+            print(f"❌ Global Error: {e}"); time.sleep(60)
+
 if __name__ == "__main__":
     main()
