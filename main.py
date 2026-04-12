@@ -279,12 +279,21 @@ class NodeCleaner:
         torrents = r.json()
         now = time.time()
         for t in torrents:
+            # 1. ข้ามถ้ายังโหลดไม่เสร็จ (progress น้อยกว่า 100%)
+            if t.get('progress', 0) < 1: 
+                continue
+        
+            # 2. ข้ามถ้าค่าเวลาโหลดเสร็จผิดปกติ
+            completion_on = t.get('completion_on', 0)
+            if completion_on <= 0:
+                continue
+
+            # 3. คำนวณเวลา Seeding จริง
+            age_hours = (now - completion_on) / 3600
             ratio = t.get('ratio', 0)
-            added_on = t.get('added_on', 0)
-            age_hours = (now - added_on) / 3600
             if self._should_remove(ratio, age_hours):
                 if self.node.delete_torrent(t['hash']):
-                    line = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Age: {age_hours:.1f}h)"
+                    line = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Seeding: {age_hours:.1f}h)"
                     print(line); res.append(line)
         return res
 
@@ -332,7 +341,7 @@ class NodeCleaner:
                 if self._should_remove(ratio, age_hours):
                     if self.node.delete_torrent(t_hash):
                         # ความสวยงาม: รายละเอียดชัดเจนแต่กระชับ
-                        line = f"  - 🗑️ {t_name[:35]}... (R:{ratio:.2f}, Age:{age_hours:.1f}h)"
+                        line = f"  - 🗑️ {t_name[:35]}... (R:{ratio:.2f}, Seeding:{age_hours:.1f}h)"
                         print(line)
                         res.append(line)
 
@@ -345,9 +354,10 @@ class NodeCleaner:
     def _should_remove(self, ratio, age_hours):
         # ลำดับความสำคัญของ Config: Node > Global > Default
         # หมายเหตุ: ค่า min_time และ max_time ใน config มักเป็นนาที ต้องหาร 60 เพื่อเทียบกับ age_hours
-        min_ratio = self.node_cfg.get('min_ratio') or self.global_cfg.get('min_ratio') or 0.5
-        min_time_m = self.node_cfg.get('min_time') or self.global_cfg.get('min_time') or 360
-        max_time_m = self.node_cfg.get('max_time') or self.global_cfg.get('max_time') or 1440
+        # ดึงค่าจาก Node ถ้าไม่มีให้ไป Global ถ้าไม่มีอีกให้ใช้ Default
+        min_ratio = self.node_cfg.get('min_ratio', self.global_cfg.get('min_ratio', 0.5))
+        min_time_m = self.node_cfg.get('min_time', self.global_cfg.get('min_time', 360))
+        max_time_m = self.node_cfg.get('max_time', self.global_cfg.get('max_time', 1440))
         
         # แปลงนาทีเป็นชั่วโมง
         min_time = min_time_m / 60
