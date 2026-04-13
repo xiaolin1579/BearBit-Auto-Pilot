@@ -9,7 +9,7 @@ import subprocess
 # --- SETUP PATH ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
-LOG_PATH = os.path.join(BASE_DIR, 'bot.log')
+LOG_PATH = os.path.join(BASE_DIR, 'script_run.log')
 
 def load_config():
     # โครงสร้างพื้นฐานกรณีไม่มีไฟล์
@@ -114,25 +114,33 @@ def handle_msg(message):
         bot.send_message(message.chat.id, status, parse_mode='Markdown')
 
     # --- จัดการ Log ---
+# --- จัดการ Log ---
     elif message.text == '📄 View Last Log':
         if os.path.exists(LOG_PATH):
             try:
-                # ดึง log มา 20 บรรทัด
-                logs = subprocess.check_output(["tail", "-n", "20", LOG_PATH]).decode('utf-8')
+                # อ่าน 50 บรรทัดล่าสุดเพื่อนำมาเลือกเฉพาะเนื้อหาสำคัญ
+                raw_logs = subprocess.check_output(["tail", "-n", "50", LOG_PATH]).decode('utf-8')
+                lines = raw_logs.split('\n')
                 
-                # ตรวจสอบความยาว (กันเหนียวไว้ที่ 3500 เพื่อไม่ให้เกิน 4096 รวมหัวข้อ)
-                if len(logs) > 3500:
-                    logs = logs[-3500:] # ตัดเอาแค่ส่วนท้ายสุด
+                # กรองเอาบรรทัดที่นับถอยหลังออก และบรรทัดที่ว่างออก
+                filtered = [l for l in lines if "Next cycle in" not in l and l.strip() != ""]
+                
+                # เลือกมาแสดงผลแค่ 15 บรรทัดสุดท้ายที่กรองแล้ว
+                display_logs = "\n".join(filtered[-15:])
+                
+                # ป้องกัน Error 400 (Message too long)
+                if len(display_logs) > 3500:
+                    display_logs = display_logs[-3500:]
                 
                 bot.send_message(
                     message.chat.id, 
-                    f"📄 **Last 20 Lines:**\n```\n{logs}\n```", 
+                    f"📄 **Last Activity (Filtered):**\n```\n{display_logs}\n```", 
                     parse_mode='Markdown'
                 )
             except Exception as e:
-                bot.send_message(message.chat.id, f"❌ เกิดข้อผิดพลาดในการอ่าน Log: {str(e)}")
+                bot.send_message(message.chat.id, f"❌ ไม่สามารถอ่าน Log ได้: {str(e)}")
         else:
-            bot.send_message(message.chat.id, "❌ ไม่พบไฟล์ Log")
+            bot.send_message(message.chat.id, "❌ ไม่พบไฟล์ script_run.log")
 
     elif message.text == '📁 Download Full Log':
         if os.path.exists(LOG_PATH):
