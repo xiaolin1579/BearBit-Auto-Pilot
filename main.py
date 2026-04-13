@@ -45,6 +45,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SEEN_FILE = os.path.join(BASE_DIR, "seen.txt")
 HASH_SEEN_FILE = os.path.join(BASE_DIR, "hash_seen.txt")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+STATS_CACHE_FILE = os.path.join(BASE_DIR, "stats_cache.json")
 
 def load_full_config():
     if not os.path.exists(CONFIG_PATH):
@@ -380,6 +381,92 @@ class NodeCleaner:
         
         return False
 
+# ========================= BEARBIT STATUS =========================
+
+def get_stats_diff(current_data):
+    """เปรียบเทียบค่าปัจจุบันกับค่าที่บันทึกไว้ (รองรับการแปลงหน่วย TB/GB/MB)"""
+    diff_msg = ""
+    if os.path.exists(STATS_CACHE_FILE):
+        with open(STATS_CACHE_FILE, 'r', encoding='utf-8') as f:
+            old_data = json.load(f)
+        
+        # 1. เทียบ Ratio และ Bonus (ใช้เลขตรงๆ)
+        def calc_num_diff(curr, old, precision=3):
+            c = float(str(curr).replace(',', ''))
+            o = float(str(old).replace(',', ''))
+            res = c - o
+            if res == 0: return "0"
+            return f"+{res:.{precision}f}" if res > 0 else f"{res:.{precision}f}"
+
+        # 2. เทียบ Upload/Download (ต้องแปลงหน่วยก่อนลบ)
+        def calc_size_diff(curr_str, old_str):
+            curr_gb = parse_size(curr_str) # ใช้ฟังก์ชัน parse_size ที่คุณมีในโปรแกรม
+            old_gb = parse_size(old_str)
+            diff_gb = curr_gb - old_gb
+            
+            if diff_gb == 0: return "0"
+            if abs(diff_gb) >= 1024:
+                return f"+{diff_gb/1024:.2f} TB" if diff_gb > 0 else f"{diff_gb/1024:.2f} TB"
+            return f"+{diff_gb:.2f} GB" if diff_gb > 0 else f"{diff_gb:.2f} GB"
+
+        r_diff = calc_num_diff(current_data['ratio'], old_data['ratio'])
+        up_diff = calc_size_diff(current_data['up'], old_data['up'])
+        dl_diff = calc_size_diff(current_data['dl'], old_data['dl'])
+        b_diff = calc_num_diff(current_data['bonus'], old_data['bonus'], 1)
+
+        # สร้างข้อความส่วนต่าง (แสดงเฉพาะที่มีการเปลี่ยนแปลง)
+        changes = []
+        if r_diff != "0": changes.append(f"Ratio: ({r_diff})")
+        if up_diff != "0": changes.append(f"Uploaded: ({up_diff})")
+        if dl_diff != "0": changes.append(f"Downloaded: ({dl_diff})")
+        if b_diff != "0": changes.append(f"Bonus: ({b_diff})")
+        
+        if changes:
+            diff_msg = "\n📊 **Changes:** " + " | ".join(changes)
+
+    # บันทึกค่าปัจจุบัน
+    with open(STATS_CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(current_data, f)
+    
+    return diff_msg
+    
+def get_bearbit_stats(page):
+    try:
+        content = page.content()
+        soup = BeautifulSoup(content, 'html.parser')
+        user_tag = soup.find("a", href=re.compile(r"userdetails\.php\?id=\d+"))
+        username = user_tag.get_text(strip=True) if user_tag else "Unknown"
+        text = soup.get_text(separator=" ")
+
+        # ดึงค่าดิบ
+        ratio = re.search(r"Ratio:\s*([\d\.,]+)", text)
+        up = re.search(r"Uploaded:\s*([\d\.,]+\s*[KMGTP]B)", text)
+        dl = re.search(r"Downloaded:\s*([\d\.,]+\s*[KMGTP]B)", text)
+        bonus = re.search(r"Bonus:\s*([\d\.,]+)", text)
+
+        if ratio and up and dl:
+            curr_data = {
+                'ratio': ratio.group(1),
+                'up': up.group(1),
+                'dl': dl.group(1),
+                'bonus': bonus.group(1) if bonus else "0",
+            }
+            
+            diff_text = get_stats_diff(curr_data)
+            
+            # จัดรูปแบบบรรทัดเดียว (Inline Style)
+            stats_msg = (
+                f"👤 **{username}** | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
+                f"💰 Bonus: {curr_data['bonus']} "
+                f"{' |' + diff_text.replace('📊 **Changes:**', '🔄') if diff_text else ''}"
+            )
+            return stats_msg
+
+        return "⚠️ ไม่สามารถดึงสถิติได้"
+
+    except Exception as e:
+        return f"⚠️ Stats Error: {str(e)}"
+        
 # ========================= MAIN FUNCTIONS =========================
 
 def auto_vote_snatched(page):
@@ -459,6 +546,11 @@ def main():
 
                     if "logout.php" in page.content():
                         print("🔑 Login Success")
+                        
+                        stats_report = get_bearbit_stats(page)
+                        print(f"\n{stats_report}")
+                        send_notify(f"📊 **BearBit Status Report**\n{stats_report}")
+    
                         auto_vote_snatched(page) # โหวตครั้งเดียวตอนเริ่มรอบ
                         
                         
