@@ -106,7 +106,7 @@ def handle_msg(message):
     elif message.text == '📊 Status Check':
         cfg_now = load_config()
         SET = cfg_now.get('SETTING', {})
-        main_running = is_process_running("python3 main.py")
+        main_running = is_process_running("main.py")
         status = (f"📍 **System Status**\n"
                   f"• Main Bot: `{'🟢 Online' if main_running else '🔴 Offline'}`\n"
                   f"• Min-Max: `{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB`\n"
@@ -116,8 +116,21 @@ def handle_msg(message):
     # --- จัดการ Log ---
     elif message.text == '📄 View Last Log':
         if os.path.exists(LOG_PATH):
-            logs = subprocess.check_output(["tail", "-n", "20", LOG_PATH]).decode('utf-8')
-            bot.send_message(message.chat.id, f"📄 **Last 20 Lines:**\n```\n{logs}\n```", parse_mode='Markdown')
+            try:
+                # ดึง log มา 20 บรรทัด
+                logs = subprocess.check_output(["tail", "-n", "20", LOG_PATH]).decode('utf-8')
+                
+                # ตรวจสอบความยาว (กันเหนียวไว้ที่ 3500 เพื่อไม่ให้เกิน 4096 รวมหัวข้อ)
+                if len(logs) > 3500:
+                    logs = logs[-3500:] # ตัดเอาแค่ส่วนท้ายสุด
+                
+                bot.send_message(
+                    message.chat.id, 
+                    f"📄 **Last 20 Lines:**\n```\n{logs}\n```", 
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ เกิดข้อผิดพลาดในการอ่าน Log: {str(e)}")
         else:
             bot.send_message(message.chat.id, "❌ ไม่พบไฟล์ Log")
 
@@ -146,21 +159,46 @@ def handle_msg(message):
 
     # --- ควบคุมบอท ---
     elif message.text == '🚀 Start Main Bot':
-        if is_process_running("python3 main.py"):
+        # ตรวจสอบก่อนว่ารันอยู่ไหม (เช็คทั้งชื่อไฟล์และตัวรัน)
+        if is_process_running("main.py"):
             bot.send_message(message.chat.id, "⚠️ บอทหลักรันอยู่แล้ว")
         else:
-            os.system(f"cd {BASE_DIR} && nohup python3 main.py > {LOG_PATH} 2>&1 &")
-            bot.send_message(message.chat.id, "🚀 เปิดบอทหลักเรียบร้อย")
+            bot.send_message(message.chat.id, "🚀 กำลังเริ่มการทำงานผ่าน Autopilot...")
+            
+            if os.name == 'posix':  # Linux
+                # รันผ่าน .sh และส่ง output ไปที่ bot.log
+                run_cmd = f"cd {BASE_DIR} && chmod +x run_autopilot.sh && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
+            else:  # Windows
+                # รันผ่าน .bat โดยใช้ start /b เพื่อให้รันเป็นเบื้องหลัง
+                run_cmd = f'start /b "" "{os.path.join(BASE_DIR, "run_autopilot.bat")}"'
+            
+            os.system(run_cmd)
+            
+            # หน่วงเวลาเช็คผลลัพธ์เล็กน้อย
+            time.sleep(5)
+            if is_process_running("main.py"):
+                bot.send_message(message.chat.id, "✅ เปิดบอทหลักเรียบร้อย (Running)")
+            else:
+                bot.send_message(message.chat.id, "❌ บอทเริ่มไม่สำเร็จ! โปรดเช็ค View Last Log")
 
     elif message.text == '🚫 Stop Main Bot':
-        os.system("pkill -15 -f 'python3 main.py'")
-        bot.send_message(message.chat.id, "🛑 หยุดบอทหลักเรียบร้อย")
+        if os.name == 'posix':
+            # Linux: ใช้ pkill สั่งปิดอย่างสุภาพ (-15)
+            os.system("pkill -15 -f 'main.py'")
+        else:
+            # Windows: ใช้ taskkill โดยอ้างอิงจากชื่อหน้าต่างหรือชื่อไฟล์
+            # หมายเหตุ: อาจต้องใช้ /F หากบอทค้าง แต่แนะนำเริ่มที่แบบปกติก่อน
+            os.system("taskkill /IM python.exe /F /FI \"IMAGENAME eq python.exe\"") 
+            # หรือระบุชื่อไฟล์ผ่าน wmic (แม่นยำกว่า)
+            os.system("wmic process where \"commandline like '%%main.py%%'\" delete")
+            
+        bot.send_message(message.chat.id, "🛑 สั่งหยุดบอทหลักเรียบร้อย")
 
     elif message.text == '🔄 Restart Main Bot':
         bot.send_message(message.chat.id, "🔄 กำลังอัปเดตและรีสตาร์ทบอทหลัก...")
         
         # 1. ปิดตัวเก่า (SIGTERM เพื่อให้บอทส่งสถิติสุดท้ายก่อนปิด)
-        os.system("pkill -15 -f 'python3 main.py'")
+        os.system("pkill -15 -f 'main.py'")
         time.sleep(3)
         
         # 2. ดึงโค้ดใหม่จาก Git
@@ -176,7 +214,7 @@ def handle_msg(message):
         os.system(run_cmd)
         
         time.sleep(5)
-        if is_process_running("python3 main.py"):
+        if is_process_running("main.py"):
             status = "✅ รีสตาร์ทบอทหลักสำเร็จ!"
             if exit_code != 0: status += "\n⚠️ หมายเหตุ: อัปเดต Git ไม่สำเร็จ"
             bot.send_message(message.chat.id, status)

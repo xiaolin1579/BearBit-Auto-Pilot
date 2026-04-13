@@ -691,14 +691,20 @@ def main():
             # จบรอบ เข้าสู่ช่วงพัก
             wait_sec = random.randint(SET.get('MIN_WAIT_MINUTES', 2)*60, SET.get('MAX_WAIT_MINUTES', 10)*60)
             wait_msg = f"💤 Cycle finished. Waiting {wait_sec//60} minutes for next scan..."
-            print(f"{wait_msg}")
+            
+            # พิมพ์ลง Log แค่ครั้งเดียวว่ากำลังรอ
+            print(wait_msg) 
             send_notify(wait_msg) 
 
             for s in range(wait_sec, 0, -1):
+                # ใช้ \r เพื่อให้พิมพ์ทับบรรทัดเดิมใน Terminal 
+                # และใช้ sys.stdout โดยตรงจะช่วยลดการเขียนลง Log ไฟล์ได้ในบางการตั้งค่า
                 sys.stdout.write(f"\r⏳ Next cycle in: {s//60}m {s%60}s...   ")
                 sys.stdout.flush()
                 time.sleep(1)
-            print("")
+            
+            # เมื่อรอเสร็จค่อยพิมพ์ขึ้นบรรทัดใหม่
+            print("\n🚀 Starting next cycle...")
 
         except Exception as e:
             print(f"❌ Global Error: {e}"); time.sleep(60)
