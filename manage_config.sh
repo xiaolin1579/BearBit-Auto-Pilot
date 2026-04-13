@@ -196,31 +196,46 @@ if v_en and v_en.strip():
 "
                         echo "✅ LINE updated."
                         ;;
-3)
-                        echo "[ Discord Configuration ]"
-                        read -p "   Enable (true/false, Enter to skip): " d_en
-                        
-                        if [[ "$d_en" == "true" ]]; then
-                            read -p "   Webhook URL: " d_url
-                            read -p "   Admin User ID to Mention (Enter to skip): " d_admin
-                        elif [[ "$d_en" == "false" ]]; then
-                            d_url=""
-                            d_admin=""
-                        fi
+					3)
+						echo "[ Discord Configuration ]"
+						echo "1) Webhook Settings (Notification)"
+						read -p "   Enable Webhook (true/false, Enter to skip): " d_en
+						if [[ "$d_en" == "true" ]]; then
+							read -p "   Webhook URL: " d_url
+							read -p "   Admin User ID to Mention: " d_admin
+						fi
 
-                        export D_EN="$d_en" D_URL="$d_url" D_ADMIN="$d_admin"
-                        
-                        update_json "
-c=d['DISCORD_CONFIG']
-v_en, v_url, v_admin = os.getenv('D_EN'), os.getenv('D_URL'), os.getenv('D_ADMIN')
+						echo ""
+						echo "2) Remote Control Settings (Bot Command)"
+						read -p "   Enable Remote Bot (true/false, Enter to skip): " dr_en
+						if [[ "$dr_en" == "true" ]]; then
+							read -p "   Remote Bot Token: " dr_token
+						fi
 
+					# ส่งค่าไปยัง Python script เพื่อ update json
+						export D_EN="$d_en" D_URL="$d_url" D_ADMIN="$d_admin" \
+							DR_EN="$dr_en" DR_TOKEN="$dr_token" 
+    
+						update_json "
+# Update Webhook Config
+c = d.get('DISCORD_CONFIG', {})
+v_en = os.getenv('D_EN')
 if v_en and v_en.strip():
     c['enable'] = (v_en.lower() == 'true')
-    if v_url: c['webhook_url'] = v_url
-    if v_admin: c['admin_id'] = v_admin
+    if os.getenv('D_URL'): c['webhook_url'] = os.getenv('D_URL')
+    if os.getenv('D_ADMIN'): c['admin_id'] = os.getenv('D_ADMIN')
+d['DISCORD_CONFIG'] = c
+
+# Update Remote Bot Config
+r = d.get('DISCORD_CONFIG', {})
+vr_en = os.getenv('DR_EN')
+if vr_en and vr_en.strip():
+    r['remote_enable'] = (vr_en.lower() == 'true')
+    if os.getenv('DR_TOKEN'): r['remote_bot_token'] = os.getenv('DR_TOKEN')
+d['DISCORD_CONFIG'].update(r) # นำค่าไปรวมไว้ใน DISCORD_CONFIG
 "
-                        echo "✅ Discord updated."
-                        ;;
+						echo "✅ Discord Webhook & Remote updated."
+						;;
                     4) break ;;
                     *) echo "Invalid option" ;;
                 esac
@@ -282,58 +297,92 @@ except Exception as e:
             read -p "Select option: " node_opt
             
             case $node_opt in
-                1)
-                    # --- ADD NODE ---
-                    read -p "Node Name: " n_name
-                    read -p "Type (qbit/rtorrent): " n_type
-                    read -p "WebUI URL: " n_url
-                    read -p "Username: " n_user
-                    read -p "Password: " n_pass
-                    read -p "Quota GB (0=unlimited): " n_quota
-                    read -p "Nginx Auth (true/false): " n_nginx
+1)
+    # --- ADD NODE ---
+    read -p "Node Name: " n_name
+    read -p "Type (qbit/rtorrent): " n_type
+    read -p "WebUI URL: " n_url
+    read -p "Username: " n_user
+    read -p "Password: " n_pass
+    read -p "Quota GB (0=unlimited): " n_quota
+    read -p "Nginx Auth (true/false): " n_nginx
 
-                    export N_NAME="$n_name" N_TYPE="$n_type" N_URL="$n_url" N_USER="$n_user" N_PASS="$n_pass" N_QUOTA="$n_quota" N_NGINX="$n_nginx"
-                    
-                    update_json "
+    # ถามเรื่อง Auto Clean
+    read -p "Enable Node Clean (true/false): " nc_en
+    nc_ratio=0.5; nc_min_t=120; nc_max_t=720 # ค่าเริ่มต้น
+    
+    if [[ "$nc_en" == "true" ]]; then
+        read -p "   > Min Ratio (e.g. 0.5): " nc_ratio
+        read -p "   > Min Time (Minutes): " nc_min_t
+        read -p "   > Max Time (Minutes): " nc_max_t
+    fi
+
+    export N_NAME="$n_name" N_TYPE="$n_type" N_URL="$n_url" N_USER="$n_user" \
+           N_PASS="$n_pass" N_QUOTA="$n_quota" N_NGINX="$n_nginx" \
+           NC_EN="$nc_en" NC_RATIO="$nc_ratio" NC_MIN_T="$nc_min_t" NC_MAX_T="$nc_max_t"
+    
+    update_json "
 new_node = {
     'name': os.getenv('N_NAME'),
     'type': os.getenv('N_TYPE'),
     'url': os.getenv('N_URL'),
     'quota_gb': float(os.getenv('N_QUOTA') or 0),
-    'nginx': True if os.getenv('N_NGINX').lower() == 'true' else False,
+    'nginx': os.getenv('N_NGINX').lower() == 'true',
     'enable': True,
-    'clean_settings': {'enable': True, 'min_ratio': 0.5, 'min_time': 120, 'max_time': 720}
+    'clean_settings': {
+        'enable': os.getenv('NC_EN').lower() == 'true',
+        'min_ratio': float(os.getenv('NC_RATIO') or 0.5),
+        'min_time': float(os.getenv('NC_MIN_T') or 120),
+        'max_time': float(os.getenv('NC_MAX_T') or 720)
+    }
 }
 if os.getenv('N_TYPE') == 'rtorrent':
     new_node.update({'rt_user': os.getenv('N_USER'), 'rt_pass': os.getenv('N_PASS')})
 else:
     new_node.update({'qb_user': os.getenv('N_USER'), 'qb_pass': os.getenv('N_PASS')})
 d['NODES'].append(new_node)"
-                    echo "✅ Added node: $n_name" ;;
+    echo "✅ Added node: $n_name" ;;
 
-				2)
-                    # --- EDIT NODE ---
-                    read -p "Enter Node Name to Edit: " edit_name
-                    # ถ้าเว้นว่างส่วนนี้จะข้ามการแก้ไขฟิลด์นั้นๆ
-                    read -p "New Quota GB (Leave blank to keep current): " e_quota
-                    read -p "Enable Node true/false (Leave blank to keep current): " e_en
-                    
-                    export E_NAME="$edit_name" E_QUOTA="$e_quota" E_EN="$e_en"
-                    
-                    update_json "
+2)
+    # --- EDIT NODE ---
+    read -p "Enter Node Name to Edit: " edit_name
+    read -p "New Quota GB (Leave blank to skip): " e_quota
+    read -p "Enable Node true/false (Leave blank to skip): " e_en
+    
+    # ถามเรื่อง Auto Clean ในหน้า Edit
+    read -p "Edit Clean Settings? (y/n): " confirm_clean
+    e_nc_en=""; e_nc_ratio=""; e_nc_min_t=""; e_nc_max_t=""
+    
+    if [[ "$confirm_clean" == "y" ]]; then
+        read -p "   > Enable Node Clean (true/false): " e_nc_en
+        if [[ "$e_nc_en" == "true" ]]; then
+            read -p "   > New Min Ratio: " e_nc_ratio
+            read -p "   > New Min Time: " e_nc_min_t
+            read -p "   > New Max Time: " e_nc_max_t
+        fi
+    fi
+
+    export E_NAME="$edit_name" E_QUOTA="$e_quota" E_EN="$e_en" \
+           EC_EN="$e_nc_en" EC_RATIO="$e_nc_ratio" EC_MIN_T="$e_nc_min_t" EC_MAX_T="$e_nc_max_t"
+    
+    update_json "
 target_found = False
 for node in d['NODES']:
     if node['name'] == os.getenv('E_NAME'):
         target_found = True
-        # ตรวจสอบว่ามีการกรอกค่าใหม่มาหรือไม่ (ถ้าไม่ว่างถึงจะทับค่าเดิม)
-        new_quota = os.getenv('E_QUOTA')
-        if new_quota and new_quota.strip():
-            node['quota_gb'] = float(new_quota)
-            
-        new_en = os.getenv('E_EN')
-        if new_en and new_en.strip():
-            node['enable'] = (new_en.lower() == 'true')
-            
+        
+        # Update Basic Info
+        if os.getenv('E_QUOTA'): node['quota_gb'] = float(os.getenv('E_QUOTA'))
+        if os.getenv('E_EN'): node['enable'] = os.getenv('E_EN').lower() == 'true'
+        
+        # Update Clean Settings
+        cs = node.get('clean_settings', {'enable':False, 'min_ratio':0.5, 'min_time':120, 'max_time':720})
+        if os.getenv('EC_EN'): cs['enable'] = os.getenv('EC_EN').lower() == 'true'
+        if os.getenv('EC_RATIO'): cs['min_ratio'] = float(os.getenv('EC_RATIO'))
+        if os.getenv('EC_MIN_T'): cs['min_time'] = float(os.getenv('EC_MIN_T'))
+        if os.getenv('EC_MAX_T'): cs['max_time'] = float(os.getenv('EC_MAX_T'))
+        node['clean_settings'] = cs
+        
         print(f'✅ Updated node: {node[\"name\"]}')
 if not target_found:
     print('❌ Node not found!')

@@ -86,11 +86,63 @@ goto account
 
 :notify
 cls
-echo --- Notification ---
-set "t_en=" & set /p t_en="Enable Telegram (true/false): "
-set "t_token=" & set /p t_token="Bot Token: "
-set "t_id=" & set /p t_id="Chat ID: "
-python -c "import json, os; d=json.load(open('config.json', encoding='utf-8')); c=d['TELEGRAM_CONFIG']; t_en=os.getenv('t_en'); t_token=os.getenv('t_token'); t_id=os.getenv('t_id'); c['notify_enable']=(t_en.lower()=='true') if t_en else c['notify_enable']; c['main_bot_token']=t_token if t_token else c['main_bot_token']; c['chat_id']=t_id if t_id else c['chat_id']; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
+echo =======================================
+echo       Notification Configuration
+echo =======================================
+
+:: --- Telegram ---
+echo [ 1. Telegram Settings ]
+set "t_en=" & set /p t_en="   Enable Telegram (true/false, Enter to skip): "
+set "t_token=" & set /p t_token="   Bot Token: "
+set "t_id=" & set /p t_id="   Chat ID: "
+
+:: --- Discord ---
+echo.
+echo [ 2. Discord Settings ]
+set "d_en=" & set /p d_en="   Enable Webhook Notify (true/false, Enter to skip): "
+set "d_url=" & set /p d_url="   Webhook URL: "
+set "d_admin=" & set /p d_admin="   Admin ID to Mention: "
+set "dr_en=" & set /p dr_en="   Enable Remote Bot (true/false, Enter to skip): "
+set "dr_token=" & set /p dr_token="   Remote Bot Token: "
+
+:: --- Line ---
+echo.
+echo [ 3. Line Settings ]
+set "l_en=" & set /p l_en="   Enable Line Notify (true/false, Enter to skip): "
+set "l_token=" & set /p l_token="   Access Token: "
+
+:: --- Processing with Python ---
+python -c "import json, os; \
+d=json.load(open('config.json', encoding='utf-8')); \
+\
+# Update Telegram \
+tc=d.get('TELEGRAM_CONFIG', {}); \
+t_en=os.getenv('t_en'); t_token=os.getenv('t_token'); t_id=os.getenv('t_id'); \
+if t_en: tc['notify_enable'] = (t_en.lower() == 'true'); \
+if t_token: tc['main_bot_token'] = t_token; \
+if t_id: tc['chat_id'] = t_id; \
+\
+# Update Discord \
+dc=d.get('DISCORD_CONFIG', {}); \
+d_en=os.getenv('d_en'); d_url=os.getenv('d_url'); d_admin=os.getenv('d_admin'); \
+dr_en=os.getenv('dr_en'); dr_token=os.getenv('dr_token'); \
+if d_en: dc['enable'] = (d_en.lower() == 'true'); \
+if d_url: dc['webhook_url'] = d_url; \
+if d_admin: dc['admin_id'] = d_admin; \
+if dr_en: dc['remote_enable'] = (dr_en.lower() == 'true'); \
+if dr_token: dc['remote_bot_token'] = dr_token; \
+\
+# Update Line \
+lc=d.get('LINE_CONFIG', {}); \
+l_en=os.getenv('l_en'); l_token=os.getenv('l_token'); \
+if l_en: lc['enable'] = (l_en.lower() == 'true'); \
+if l_token: lc['access_token'] = l_token; \
+\
+json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
+
+echo.
+echo ✅ All notifications updated!
+pause
 goto menu
 
 :filter
@@ -129,6 +181,8 @@ if "%op%"=="d" goto node_del
 goto menu
 
 :node_add
+cls
+echo --- Add New Node ---
 set /p n_name="Name: "
 set /p n_type="Type (qbit/rtorrent): "
 set /p n_url="URL: "
@@ -136,21 +190,92 @@ set /p n_user="User: "
 set /p n_pass="Pass: "
 set /p n_quota="Quota (GB): "
 set /p n_nginx="Nginx Auth (true/false): "
+
+echo -- Clean Settings --
+set "nc_en=false"
 set /p nc_en="Enable Node Clean (true/false): "
-python -c "import json; d=json.load(open('config.json', encoding='utf-8')); d['NODES'].append({'name':'%n_name%','type':'%n_type%','url':'%n_url%','qb_user':'%n_user%','qb_pass':'%n_pass%','rt_user':'%n_user%','rt_pass':'%n_pass%','quota_gb':float('%n_quota%' or 0),'nginx':(True if '%n_nginx%'.lower()=='true' else False),'enable':True,'clean_settings':{'enable':(True if '%nc_en%'.lower()=='true' else False),'min_ratio':0.5,'min_time':360.0,'max_time':720.0}}); json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2)"
+
+:: ค่าเริ่มต้นสำหรับ Clean Settings
+set "nc_ratio=0.5"
+set "nc_min_t=120"
+set "nc_max_t=720"
+
+:: ถ้าพิมพ์ true ให้กระโดดไปถามรายละเอียดเพิ่ม
+if /i "%nc_en%"=="true" (
+    set /p nc_ratio="   > Min Ratio (e.g. 0.5): "
+    set /p nc_min_t="   > Min Time (Minutes): "
+    set /p nc_max_t="   > Max Time (Minutes): "
+)
+
+python -c "import json, os; \
+d=json.load(open('config.json', encoding='utf-8')); \
+node = { \
+    'name': '%n_name%', 'type': '%n_type%', 'url': '%n_url%', \
+    'qb_user': '%n_user%', 'qb_pass': '%n_pass%', \
+    'rt_user': '%n_user%', 'rt_pass': '%n_pass%', \
+    'nginx': (True if '%n_nginx%'.lower()=='true' else False), \
+    'quota_gb': float('%n_quota%' or 0), 'enable': True, \
+    'clean_settings': { \
+        'enable': ('%nc_en%'.lower()=='true'), \
+        'min_ratio': float('%nc_ratio%'), \
+        'min_time': float('%nc_min_t%'), \
+        'max_time': float('%nc_max_t%') \
+    } \
+}; \
+d['NODES'].append(node); \
+json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
 goto menu
 
 :node_edit
-set /p idx="Enter Index to Edit: "
+cls
+echo --- Edit Node ---
+set /p idx="Enter Index to Edit (0, 1, 2...): "
 echo --- Editing Node %idx% ---
-set /p n_name="Name: "
-set /p n_url="URL: "
-set /p n_user="User: "
-set /p n_pass="Pass: "
-set /p n_quota="Quota (GB): "
-set /p n_nginx="Nginx Auth (true/false): "
-set /p nc_en="Enable Node Clean (true/false): "
-python -c "import json; d=json.load(open('config.json', encoding='utf-8')); n=d['NODES'][%idx%]; n['name']='%n_name%' or n['name']; n['url']='%n_url%' or n['url']; if '%n_user%': n['qb_user']=n['rt_user']='%n_user%'; if '%n_pass%': n['qb_pass']=n['rt_pass']='%n_pass%'; n['quota_gb']=float('%n_quota%') if '%n_quota%' else n['quota_gb']; n['nginx']=(True if '%n_nginx%'.lower()=='true' else False) if '%n_nginx%' else n.get('nginx', True); cs=n.get('clean_settings', {'enable':False, 'min_ratio':0.5, 'min_time':360.0, 'max_time':720.0}); cs['enable']=(True if '%nc_en%'.lower()=='true' else False) if '%nc_en%' else cs['enable']; n['clean_settings']=cs; json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2)"
+set /p n_name="Name (Enter to skip): "
+set /p n_url="URL (Enter to skip): "
+set /p n_user="User (Enter to skip): "
+set /p n_pass="Pass (Enter to skip): "
+set /p n_quota="Quota GB (Enter to skip): "
+set /p n_nginx="Nginx Auth true/false (Enter to skip): "
+
+echo -- Clean Settings --
+set "nc_en="
+set /p nc_en="Enable Node Clean true/false (Enter to skip): "
+
+set "nc_ratio="
+set "nc_min_t="
+set "nc_max_t="
+
+:: ถ้าค่า nc_en ที่กรอกใหม่เป็น true ให้ถามรายละเอียดเพิ่ม
+if /i "%nc_en%"=="true" (
+    set /p nc_ratio="   > Min Ratio (Enter to skip): "
+    set /p nc_min_t="   > Min Time (Enter to skip): "
+    set /p nc_max_t="   > Max Time (Enter to skip): "
+)
+
+python -c "import json, os; \
+d=json.load(open('config.json', encoding='utf-8')); \
+idx=int('%idx%'); \
+if idx < len(d['NODES']): \
+    n=d['NODES'][idx]; \
+    if '%n_name%': n['name']='%n_name%'; \
+    if '%n_url%': n['url']='%n_url%'; \
+    if '%n_user%': n['qb_user']=n['rt_user']='%n_user%'; \
+    if '%n_pass%': n['qb_pass']=n['rt_pass']='%n_pass%'; \
+    if '%n_quota%': n['quota_gb']=float('%n_quota%'); \
+    if '%n_nginx%': n['nginx']=('%n_nginx%'.lower()=='true'); \
+    \
+    cs=n.get('clean_settings', {'enable':False, 'min_ratio':0.5, 'min_time':120, 'max_time':720}); \
+    if '%nc_en%': cs['enable']=('%nc_en%'.lower()=='true'); \
+    if '%nc_ratio%': cs['min_ratio']=float('%nc_ratio%'); \
+    if '%nc_min_t%': cs['min_time']=float('%nc_min_t%'); \
+    if '%nc_max_t%': cs['max_time']=float('%nc_max_t%'); \
+    n['clean_settings']=cs; \
+    \
+    json.dump(d, open('config.json', 'w', encoding='utf-8'), indent=2, ensure_ascii=False); \
+    print('✅ Node Updated'); \
+else: print('❌ Index not found');"
+pause
 goto menu
 
 :node_del
