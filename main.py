@@ -54,30 +54,58 @@ def load_full_config():
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def send_notify(msg):
-    """ส่งแจ้งเตือนผ่าน LINE, Telegram และ Discord"""
+def send_notify(msg, raw_data=None):
+    """
+    ส่งแจ้งเตือนผ่าน Messaging API (Flex Message), Telegram (HTML) และ Discord (Markdown)
+    :param msg: ข้อความต้นฉบับที่มีแท็ก <b> </b>
+    :param raw_data: (Optional) dict ข้อมูลดิบสำหรับสร้าง Flex Message ที่สวยงาม
+    """
     cfg = load_full_config()
     msg = msg.strip()
     
-    # 1. LINE Notify
+    # เตรียมข้อความสำหรับแต่ละแพลตฟอร์ม
+    # Discord: เปลี่ยน <b> เป็น **
+    discord_msg = msg.replace('<b>', '**').replace('</b>', '**')
+    # LINE Text: ลบแท็กออก (กรณีส่งแบบ Text ปกติ)
+    line_clean_msg = msg.replace('<b>', '').replace('</b>', '')
+
+    # 1. LINE Messaging API (แทน LINE Notify)
     line_cfg = cfg.get('LINE_CONFIG', {})
     if line_cfg.get('enable') and line_cfg.get('access_token'):
-        try: requests.post('https://notify-api.line.me/api/notify', headers={'Authorization': f"Bearer {line_cfg.get('access_token')}"}, data={'message': msg}, timeout=10)
+        url = "https://api.line.me/v2/bot/message/push"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {line_cfg.get('access_token')}"
+        }
+        
+        # ส่งแบบ Text (ถ้าต้องการความง่าย) หรือ Flex (ถ้าต้องการตัวหนา)
+        # ในที่นี้ส่งแบบ Text ให้ก่อนเพื่อให้โค้ดไม่ซับซ้อน แต่เปลี่ยนเป็นตัวหนาในอนาคตได้
+        payload = {
+            "to": line_cfg.get('user_id'),
+            "messages": [{"type": "text", "text": line_clean_msg}]
+        }
+        
+        try: requests.post(url, json=payload, headers=headers, timeout=10)
         except: pass
 
-    # 2. Telegram Bot
+    # 2. Telegram Bot (HTML)
     tele_cfg = cfg.get('TELEGRAM_CONFIG', {})
-    if tele_cfg.get('notify_enable') and tele_cfg.get('main_bot_token') and tele_cfg.get('chat_id'):
-        try: requests.post(f"https://api.telegram.org/bot{tele_cfg.get('main_bot_token')}/sendMessage", json={'chat_id': tele_cfg.get('chat_id'), 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
+    if tele_cfg.get('notify_enable') and tele_cfg.get('main_bot_token'):
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{tele_cfg.get('main_bot_token')}/sendMessage",
+                json={'chat_id': tele_cfg.get('chat_id'), 'text': msg, 'parse_mode': 'HTML'},
+                timeout=10
+            )
         except: pass
 
-    # 3. Discord Webhook
+    # 3. Discord Webhook (Markdown)
     disc_cfg = cfg.get('DISCORD_CONFIG', {})
     if disc_cfg.get('enable') and disc_cfg.get('webhook_url'):
         try:
             admin_id = disc_cfg.get('admin_id', '').strip()
             mention = f"<@{admin_id}> " if admin_id else ""
-            payload = {"content": f"{mention}**[BearBit Notification]**\n{msg}"}
+            payload = {"content": f"{mention}**[BearBit Notification]**\n{discord_msg}"}
             requests.post(disc_cfg.get('webhook_url'), json=payload, timeout=10)
         except: pass
 
@@ -422,7 +450,7 @@ def get_stats_diff(current_data):
         if b_diff != "0": changes.append(f"Bonus: ({b_diff})")
         
         if changes:
-            diff_msg = "\n📊 **Changes:** " + " | ".join(changes)
+            diff_msg = "\n📊 <b>Changes:</b> " + " | ".join(changes)
 
     # บันทึกค่าปัจจุบัน
     with open(STATS_CACHE_FILE, 'w', encoding='utf-8') as f:
@@ -456,9 +484,9 @@ def get_bearbit_stats(page):
             
             # จัดรูปแบบบรรทัดเดียว (Inline Style)
             stats_msg = (
-                f"👤 **{username}** | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
+                f"👤 <b>{username}</b> | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
                 f"💰 Bonus: {curr_data['bonus']} "
-                f"{' |' + diff_text.replace('📊 **Changes:**', '🔄') if diff_text else ''}"
+                f"{' |' + diff_text.replace('📊 <b>Changes:</b>', '🔄') if diff_text else ''}"
             )
             return stats_msg
 
@@ -517,7 +545,7 @@ def main():
                 print(line); node_status_buffer.append(line)
             
             if node_status_buffer:
-                send_notify("🔌 **Node Status Report**\n" + "\n".join(node_status_buffer))
+                send_notify("🔌 <b>Node Status Report</b>\n" + "\n".join(node_status_buffer))
 
             # 2. Browser Section
             with sync_playwright() as p:
@@ -549,7 +577,7 @@ def main():
                         
                         stats_report = get_bearbit_stats(page)
                         print(f"\n{stats_report}")
-                        send_notify(f"📊 **BearBit Status Report**\n{stats_report}")
+                        send_notify(f"📊 <b>BearBit Status Report</b>\n{stats_report}")
     
                         auto_vote_snatched(page) # โหวตครั้งเดียวตอนเริ่มรอบ
                         
@@ -637,8 +665,8 @@ def main():
                             # ======================================================
                             if len(added_in_zone) > 0 or count_skip > 0:
                                 summary_msg = (
-                                    f"⚙️ **เงื่อนไข:** ขนาด {SET.get('MIN_SIZE_GB', 0):.1f}-{SET.get('MAX_SIZE_GB', 999):.1f}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}\n"
-                                    f"🌐 **Scanning:** [{display_zone}] {target_url}\n\n"
+                                    f"⚙️ <b>เงื่อนไข:</b> ขนาด {SET.get('MIN_SIZE_GB', 0):.1f}-{SET.get('MAX_SIZE_GB', 999):.1f}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}\n"
+                                    f"🌐 <b>Scanning:</b> [{display_zone}] {target_url}\n\n"
                                 )
 
                                 if added_in_zone:
@@ -646,7 +674,7 @@ def main():
                                 else:
                                     summary_msg += "❌ ไม่มีไฟล์เข้าเงื่อนไข\n\n"             
                                     
-                                footer = f"📊 **สรุป {display_zone}:** เพิ่มใหม่ {len(added_in_zone)} | ข้าม {count_skip}"
+                                footer = f"📊 <b>สรุป {display_zone}:</b> เพิ่มใหม่ {len(added_in_zone)} | ข้าม {count_skip}"
                                 summary_msg += footer
                             
                                 print(f"\n{footer}") # แสดงในหน้าจอ
