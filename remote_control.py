@@ -138,7 +138,13 @@ async def main():
                     await asyncio.sleep(2)
                     os.system(f"cd {BASE_DIR} && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &")
                     await tg_bot.send_message(message.chat.id, "✅ อัปเดตและเริ่มบอทใหม่เรียบร้อย")
-
+                elif txt == '♻️ Restart Remote':
+                    await tg_bot.send_message(message.chat.id, "♻️ กำลังรีสตาร์ท Remote Control... (โปรดรอสักครู่)")
+                    # ใช้ os._exit(0) เพื่อปิดโปรเซสทันที 
+                    # สคริปต์ Loop ใน .bat หรือ .sh จะทำการ Restart บอทขึ้นมาใหม่เอง
+                    os._exit(0)
+                elif txt == '⬅️ Back':
+                    await tg_bot.send_message(message.chat.id, "🏠 กลับหน้าหลัก", reply_markup=main_menu())
             tasks.append(tg_bot.polling(non_stop=True))
             print("📡 Telegram Remote: ENABLED")
         except Exception as e: print(f"❌ TG Error: {e}")
