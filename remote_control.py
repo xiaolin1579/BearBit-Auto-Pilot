@@ -176,7 +176,7 @@ def handle_msg(message):
         os.system(run_cmd)
         
         time.sleep(5)
-        if is_process_running("main.py"):
+        if is_process_running("python3 main.py"):
             status = "✅ รีสตาร์ทบอทหลักสำเร็จ!"
             if exit_code != 0: status += "\n⚠️ หมายเหตุ: อัปเดต Git ไม่สำเร็จ"
             bot.send_message(message.chat.id, status)
