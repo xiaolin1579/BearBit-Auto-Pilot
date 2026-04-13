@@ -101,7 +101,7 @@ def send_notify(msg, raw_data=None):
 
     # 3. Discord Webhook (Markdown)
     disc_cfg = cfg.get('DISCORD_CONFIG', {})
-    if disc_cfg.get('enable') and disc_cfg.get('webhook_url'):
+    if disc_cfg.get('notify_enable') and disc_cfg.get('webhook_url'):
         try:
             admin_id = disc_cfg.get('admin_id', '').strip()
             mention = f"<@{admin_id}> " if admin_id else ""

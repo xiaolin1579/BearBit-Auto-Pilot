@@ -41,7 +41,7 @@ while true; do
     read -p "Select [1-6]: " choice
 
     case $choice in
-1)
+	1)
             while true; do
                 clear
                 echo -e "${GREEN}==========================================${NC}"
@@ -120,7 +120,7 @@ if 0 <= idx < len(urls):
                 esac
             done
             ;;
-2)
+	2)
             while true; do
                 echo "--- Notification Settings ---"
                 echo "1) Telegram Config"
@@ -130,7 +130,7 @@ if 0 <= idx < len(urls):
                 read -p "Select provider: " notify_opt
                 
                 case $notify_opt in
-1)
+					1)
                         echo "[ Telegram Configuration ]"
                         # --- ส่วน Notify ---
                         read -p "   Notify Enable (true/false, Enter to skip): " t_en
@@ -221,7 +221,7 @@ if v_en and v_en.strip():
 c = d.get('DISCORD_CONFIG', {})
 v_en = os.getenv('D_EN')
 if v_en and v_en.strip():
-    c['enable'] = (v_en.lower() == 'true')
+    c['notify_enable'] = (v_en.lower() == 'true')
     if os.getenv('D_URL'): c['webhook_url'] = os.getenv('D_URL')
     if os.getenv('D_ADMIN'): c['admin_id'] = os.getenv('D_ADMIN')
 d['DISCORD_CONFIG'] = c

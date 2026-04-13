@@ -8,8 +8,9 @@ lxml
 # ระบบ Browser Engine (Playwright)
 playwright
 
-# รีโมทคอนโทรลผ่าน Telegram
+# รีโมทคอนโทรลผ่าน Telegram & Discord
 pyTelegramBotAPI
+discord.py
 
 # อื่นๆ
 urllib3

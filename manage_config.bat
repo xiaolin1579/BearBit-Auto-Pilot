@@ -126,7 +126,7 @@ if t_id: tc['chat_id'] = t_id; \
 dc=d.get('DISCORD_CONFIG', {}); \
 d_en=os.getenv('d_en'); d_url=os.getenv('d_url'); d_admin=os.getenv('d_admin'); \
 dr_en=os.getenv('dr_en'); dr_token=os.getenv('dr_token'); \
-if d_en: dc['enable'] = (d_en.lower() == 'true'); \
+if d_en: dc['notify_enable'] = (d_en.lower() == 'true'); \
 if d_url: dc['webhook_url'] = d_url; \
 if d_admin: dc['admin_id'] = d_admin; \
 if dr_en: dc['remote_enable'] = (dr_en.lower() == 'true'); \

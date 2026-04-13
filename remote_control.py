@@ -1,35 +1,21 @@
 import telebot
 from telebot import types
-import time
-import json
+from telebot.async_telebot import AsyncTeleBot
+import discord
+from discord.ext import commands
+import asyncio
 import os
-import sys
+import json
 import subprocess
+import time
 
-# --- SETUP PATH ---
+# --- SETUP PATH & CONFIG ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 LOG_PATH = os.path.join(BASE_DIR, 'script_run.log')
 
 def load_config():
-    # โครงสร้างพื้นฐานกรณีไม่มีไฟล์
-    default_config = {
-        "BEARBIT": {"user": "", "pass": ""},
-        "TELEGRAM_CONFIG": {
-            "remote_enable": True, 
-            "remote_bot_token": "YOUR_TOKEN", 
-            "chat_id": "YOUR_ID"
-        },
-        "SETTING": {"MIN_SIZE_GB": 1.0, "MAX_SIZE_GB": 500.0},
-        "NODES": []
-    }
-    
-    if not os.path.exists(CONFIG_PATH):
-        print(f"⚠️ ไม่พบ {CONFIG_PATH} -> กำลังสร้างไฟล์เริ่มต้น...")
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, indent=4, ensure_ascii=False)
-        return default_config
-        
+    if not os.path.exists(CONFIG_PATH): return {}
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -37,223 +23,150 @@ def save_config(config):
     with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
-# --- INITIALIZE REMOTE BOT ---
-cfg = load_config()
-TELE_CFG = cfg.get('TELEGRAM_CONFIG', {})
-
-if not TELE_CFG.get('remote_enable', False):
-    print("⚠️ Remote Bot ถูกปิดใช้งานอยู่ใน config.json")
-    sys.exit(0)
-
-TOKEN = TELE_CFG.get('remote_bot_token')
-if not TOKEN:
-    print("❌ Error: ไม่พบ remote_bot_token ใน config.json")
-    sys.exit(1)
-
-try:
-    ADMIN_ID = int(TELE_CFG.get('chat_id'))
-except (ValueError, TypeError):
-    print("❌ Error: chat_id ไม่ถูกต้อง")
-    sys.exit(1)
-
-bot = telebot.TeleBot(TOKEN)
-
-# --- KEYBOARD MENUS ---
-def main_menu():
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add('📊 Status Check', '⚙️ Config Settings')
-    markup.add('📄 View Last Log', '📁 Download Full Log')
-    markup.add('🎮 Bot Controls')
-    return markup
-
-def settings_menu():
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add('📏 Set Min Size', '📐 Set Max Size', '♻️ Toggle Freeload', '⬅️ Back to Main')
-    return markup
-
-def controls_menu():
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add('🚀 Start Main Bot', '🚫 Stop Main Bot', '🔄 Restart Main Bot', '🔄 Restart Remote', '⬅️ Back to Main')
-    return markup
-
+# --- SHARED FUNCTIONS ---
 def is_process_running(name):
     try:
-        subprocess.check_output(["pgrep", "-f", name])
-        return True
-    except subprocess.CalledProcessError:
-        return False
+        if os.name == 'nt': # Windows
+            cmd = 'tasklist /FI "IMAGENAME eq python.exe"'
+            output = subprocess.check_output(cmd, shell=True).decode()
+            return name in output
+        else: # Linux/macOS
+            subprocess.check_output(["pgrep", "-f", name])
+            return True
+    except: return False
 
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    if message.chat.id == ADMIN_ID:
-        bot.reply_to(message, "🕹️ BearBit Remote Control (Online)", reply_markup=main_menu())
+def get_status_text():
+    c = load_config()
+    SET = c.get('SETTING', {})
+    main_running = is_process_running("main.py")
+    return (f"📍 **System Status**\n"
+            f"• Main Bot: `{'🟢 Online' if main_running else '🔴 Offline'}`\n"
+            f"• Min-Max: `{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB`\n"
+            f"• Freeload Only: `{'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}`")
 
-@bot.message_handler(func=lambda message: True)
-def handle_msg(message):
-    if message.chat.id != ADMIN_ID: return
-
-    # --- เมนูหลัก ---
-    if message.text == '⚙️ Config Settings':
-        bot.send_message(message.chat.id, "🛠️ ตั้งค่าการกรองไฟล์", reply_markup=settings_menu())
-    
-    elif message.text == '🎮 Bot Controls':
-        bot.send_message(message.chat.id, "🕹️ ควบคุมระบบบอท", reply_markup=controls_menu())
-    
-    elif message.text == '⬅️ Back to Main':
-        bot.send_message(message.chat.id, "🏠 กลับหน้าหลัก", reply_markup=main_menu())
-
-    # --- ตรวจสอบสถานะ ---
-    elif message.text == '📊 Status Check':
-        cfg_now = load_config()
-        SET = cfg_now.get('SETTING', {})
-        main_running = is_process_running("main.py")
-        status = (f"📍 **System Status**\n"
-                  f"• Main Bot: `{'🟢 Online' if main_running else '🔴 Offline'}`\n"
-                  f"• Min-Max: `{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB`\n"
-                  f"• Freeload Only: `{'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}`")
-        bot.send_message(message.chat.id, status, parse_mode='Markdown')
-
-    # --- จัดการ Log ---
-# --- จัดการ Log ---
-    elif message.text == '📄 View Last Log':
-        if os.path.exists(LOG_PATH):
-            try:
-                # อ่าน 50 บรรทัดล่าสุดเพื่อนำมาเลือกเฉพาะเนื้อหาสำคัญ
-                raw_logs = subprocess.check_output(["tail", "-n", "50", LOG_PATH]).decode('utf-8')
-                lines = raw_logs.split('\n')
-                
-                # กรองเอาบรรทัดที่นับถอยหลังออก และบรรทัดที่ว่างออก
-                filtered = [l for l in lines if "Next cycle in" not in l and l.strip() != ""]
-                
-                # เลือกมาแสดงผลแค่ 15 บรรทัดสุดท้ายที่กรองแล้ว
-                display_logs = "\n".join(filtered[-15:])
-                
-                # ป้องกัน Error 400 (Message too long)
-                if len(display_logs) > 3500:
-                    display_logs = display_logs[-3500:]
-                
-                bot.send_message(
-                    message.chat.id, 
-                    f"📄 **Last Activity (Filtered):**\n```\n{display_logs}\n```", 
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                bot.send_message(message.chat.id, f"❌ ไม่สามารถอ่าน Log ได้: {str(e)}")
-        else:
-            bot.send_message(message.chat.id, "❌ ไม่พบไฟล์ script_run.log")
-
-    elif message.text == '📁 Download Full Log':
-        if os.path.exists(LOG_PATH):
-            with open(LOG_PATH, 'rb') as f:
-                bot.send_document(message.chat.id, f, caption="📄 Full Log")
-        else:
-            bot.send_message(message.chat.id, "❌ ไม่พบไฟล์ Log")
-
-    # --- ฟังก์ชันแก้ไข Config (แบบ Interactive) ---
-    elif message.text == '📏 Set Min Size':
-        msg = bot.send_message(message.chat.id, "🔢 ส่งค่า Min Size (GB) ที่ต้องการ (เช่น 15):")
-        bot.register_next_step_handler(msg, update_min_size)
-
-    elif message.text == '📐 Set Max Size':
-        msg = bot.send_message(message.chat.id, "🔢 ส่งค่า Max Size (GB) ที่ต้องการ (เช่น 200):")
-        bot.register_next_step_handler(msg, update_max_size)
-
-    elif message.text == '♻️ Toggle Freeload':
-        c = load_config()
-        current = c['SETTING'].get('FREELOAD_ENABLE', True)
-        c['SETTING']['FREELOAD_ENABLE'] = not current
-        save_config(c)
-        bot.send_message(message.chat.id, f"✅ เปลี่ยน Freeload เป็น: `{'On' if not current else 'Off'}`", parse_mode='Markdown')
-
-    # --- ควบคุมบอท ---
-    elif message.text == '🚀 Start Main Bot':
-        # ตรวจสอบก่อนว่ารันอยู่ไหม (เช็คทั้งชื่อไฟล์และตัวรัน)
-        if is_process_running("main.py"):
-            bot.send_message(message.chat.id, "⚠️ บอทหลักรันอยู่แล้ว")
-        else:
-            bot.send_message(message.chat.id, "🚀 กำลังเริ่มการทำงานผ่าน Autopilot...")
-            
-            if os.name == 'posix':  # Linux
-                # รันผ่าน .sh และส่ง output ไปที่ bot.log
-                run_cmd = f"cd {BASE_DIR} && chmod +x run_autopilot.sh && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
-            else:  # Windows
-                # รันผ่าน .bat โดยใช้ start /b เพื่อให้รันเป็นเบื้องหลัง
-                run_cmd = f'start /b "" "{os.path.join(BASE_DIR, "run_autopilot.bat")}"'
-            
-            os.system(run_cmd)
-            
-            # หน่วงเวลาเช็คผลลัพธ์เล็กน้อย
-            time.sleep(5)
-            if is_process_running("main.py"):
-                bot.send_message(message.chat.id, "✅ เปิดบอทหลักเรียบร้อย (Running)")
-            else:
-                bot.send_message(message.chat.id, "❌ บอทเริ่มไม่สำเร็จ! โปรดเช็ค View Last Log")
-
-    elif message.text == '🚫 Stop Main Bot':
-        if os.name == 'posix':
-            # Linux: ใช้ pkill สั่งปิดอย่างสุภาพ (-15)
-            os.system("pkill -15 -f 'main.py'")
-        else:
-            # Windows: ใช้ taskkill โดยอ้างอิงจากชื่อหน้าต่างหรือชื่อไฟล์
-            # หมายเหตุ: อาจต้องใช้ /F หากบอทค้าง แต่แนะนำเริ่มที่แบบปกติก่อน
-            os.system("taskkill /IM python.exe /F /FI \"IMAGENAME eq python.exe\"") 
-            # หรือระบุชื่อไฟล์ผ่าน wmic (แม่นยำกว่า)
-            os.system("wmic process where \"commandline like '%%main.py%%'\" delete")
-            
-        bot.send_message(message.chat.id, "🛑 สั่งหยุดบอทหลักเรียบร้อย")
-
-    elif message.text == '🔄 Restart Main Bot':
-        bot.send_message(message.chat.id, "🔄 กำลังอัปเดตและรีสตาร์ทบอทหลัก...")
-        
-        # 1. ปิดตัวเก่า (SIGTERM เพื่อให้บอทส่งสถิติสุดท้ายก่อนปิด)
-        os.system("pkill -15 -f 'main.py'")
-        time.sleep(3)
-        
-        # 2. ดึงโค้ดใหม่จาก Git
-        pull_cmd = f"cd {BASE_DIR} && git fetch --all && git reset --hard origin/main"
-        exit_code = os.system(pull_cmd)
-        
-        # 3. รันผ่านสคริปต์ Auto-Pilot เพื่อเช็ค Library ใหม่ๆ 
-        if os.name == 'posix': # Linux
-            run_cmd = f"cd {BASE_DIR} && chmod +x run_autopilot.sh && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
-        else: # Windows
-            run_cmd = f"start /b run_autopilot.bat"
-            
-        os.system(run_cmd)
-        
-        time.sleep(5)
-        if is_process_running("main.py"):
-            status = "✅ รีสตาร์ทบอทหลักสำเร็จ!"
-            if exit_code != 0: status += "\n⚠️ หมายเหตุ: อัปเดต Git ไม่สำเร็จ"
-            bot.send_message(message.chat.id, status)
-        else:
-            bot.send_message(message.chat.id, "❌ บอทไม่ทำงาน! โปรดเช็ค Log")
-
-    elif message.text == '🔄 Restart Remote':
-        bot.send_message(message.chat.id, "♻️ รีสตาร์ทรีโมท...")
-        os._exit(0)
-
-# --- Functions สำหรับรับค่าจากแชท ---
-def update_min_size(message):
+def get_filtered_logs(n=15):
+    if not os.path.exists(LOG_PATH): return "❌ ไม่พบไฟล์ Log"
     try:
-        val = float(message.text)
-        c = load_config()
-        c['SETTING']['MIN_SIZE_GB'] = val
-        save_config(c)
-        bot.send_message(message.chat.id, f"✅ อัปเดต Min Size เป็น `{val}` GB เรียบร้อย", parse_mode='Markdown')
-    except:
-        bot.send_message(message.chat.id, "❌ กรุณาส่งเป็นตัวเลขเท่านั้น")
+        raw_logs = subprocess.check_output(["tail", "-n", "50", LOG_PATH]).decode('utf-8') if os.name != 'nt' else ""
+        if not raw_logs:
+            with open(LOG_PATH, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        else:
+            lines = raw_logs.split('\n')
 
-def update_max_size(message):
-    try:
-        val = float(message.text)
-        c = load_config()
-        c['SETTING']['MAX_SIZE_GB'] = val
-        save_config(c)
-        bot.send_message(message.chat.id, f"✅ อัปเดต Max Size เป็น `{val}` GB เรียบร้อย", parse_mode='Markdown')
-    except:
-        bot.send_message(message.chat.id, "❌ กรุณาส่งเป็นตัวเลขเท่านั้น")
+        filtered = [l for l in lines if "Next cycle in" not in l and l.strip() != ""]
+        return "\n".join(filtered[-n:])
+    except: return "⚠️ อ่าน Log ขัดข้อง"
+
+# --- MAIN RUNNER ---
+async def main():
+    CONF = load_config()
+    tasks = []
+    print("🚀 Initializing Hybrid Remote Control...")
+
+    # --- 🔵 TELEGRAM SECTION ---
+    tg_cfg = CONF.get('TELEGRAM_CONFIG', {})
+    if tg_cfg.get('remote_enable', False):
+        try:
+            tg_bot = AsyncTeleBot(tg_cfg['remote_bot_token'])
+            TG_CHAT_ID = str(tg_cfg['chat_id'])
+
+            def main_menu():
+                m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+                m.add('📊 Status Check', '⚙️ Config Settings', '📄 View Log', '📁 Download Log', '🎮 Bot Controls')
+                return m
+
+            def settings_menu():
+                m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+                m.add('📏 Set Min Size', '📐 Set Max Size', '♻️ Toggle Freeload', '⬅️ Back')
+                return m
+
+            def controls_menu():
+                m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+                m.add('🚀 Start Bot', '🚫 Stop Bot', '🔄 Restart & Update', '♻️ Restart Remote', '⬅️ Back')
+                return m
+
+            @tg_bot.message_handler(commands=['start'])
+            async def tg_start(message):
+                if str(message.chat.id) == TG_CHAT_ID:
+                    await tg_bot.send_message(message.chat.id, "🕹️ BearBit Remote Online", reply_markup=main_menu())
+
+            @tg_bot.message_handler(func=lambda m: True)
+            async def tg_handle(message):
+                if str(message.chat.id) != TG_CHAT_ID: return
+                txt = message.text
+
+                if txt == '📊 Status Check':
+                    await tg_bot.send_message(message.chat.id, get_status_text(), parse_mode='Markdown')
+                elif txt == '⚙️ Config Settings':
+                    await tg_bot.send_message(message.chat.id, "🛠️ ตั้งค่าการกรองไฟล์", reply_markup=settings_menu())
+                elif txt == '🎮 Bot Controls':
+                    await tg_bot.send_message(message.chat.id, "🕹️ ควบคุมระบบ", reply_markup=controls_menu())
+                elif txt == '⬅️ Back':
+                    await tg_bot.send_message(message.chat.id, "🏠 กลับหน้าหลัก", reply_markup=main_menu())
+                elif txt == '📄 View Log':
+                    await tg_bot.send_message(message.chat.id, f"```\n{get_filtered_logs()}\n```", parse_mode='Markdown')
+
+                # --- Config Actions ---
+                elif txt == '♻️ Toggle Freeload':
+                    c = load_config()
+                    curr = c['SETTING'].get('FREELOAD_ENABLE', True)
+                    c['SETTING']['FREELOAD_ENABLE'] = not curr
+                    save_config(c)
+                    await tg_bot.send_message(message.chat.id, f"✅ Freeload: `{'ON' if not curr else 'OFF'}`", parse_mode='Markdown')
+
+                # --- Control Actions ---
+                elif txt == '🚀 Start Bot':
+                    if is_process_running("main.py"): await tg_bot.send_message(message.chat.id, "⚠️ บอทรันอยู่แล้ว")
+                    else:
+                        run_cmd = f"cd {BASE_DIR} && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &" if os.name != 'nt' else f'start /b "" "{os.path.join(BASE_DIR, "run_autopilot.bat")}"'
+                        os.system(run_cmd)
+                        await tg_bot.send_message(message.chat.id, "🚀 กำลังเริ่มการทำงานผ่าน Autopilot...")
+                        time.sleep(5)
+                        if is_process_running("main.py"):
+                            await tg_bot.send_message(message.chat.id, "✅ เปิดบอทหลักเรียบร้อย (Running)")
+                        else:
+                            await tg_bot.send_message(message.chat.id, "❌ บอทเริ่มไม่สำเร็จ! โปรดเช็ค View Last Log")
+                elif txt == '🚫 Stop Bot':
+                    stop_cmd = "pkill -15 -f 'main.py'" if os.name != 'nt' else 'taskkill /F /FI "IMAGENAME eq python.exe"'
+                    os.system(stop_cmd)
+                    await tg_bot.send_message(message.chat.id, "🛑 สั่งหยุดบอทหลักแล้ว")
+                elif txt == '🔄 Restart & Update':
+                    await tg_bot.send_message(message.chat.id, "🔄 ปิดบอทและดึงโค้ดใหม่จาก Git...")
+                    os.system("pkill -15 -f 'main.py'")
+                    os.system(f"cd {BASE_DIR} && git fetch --all && git reset --hard origin/main")
+                    await asyncio.sleep(2)
+                    os.system(f"cd {BASE_DIR} && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &")
+                    await tg_bot.send_message(message.chat.id, "✅ อัปเดตและเริ่มบอทใหม่เรียบร้อย")
+
+            tasks.append(tg_bot.polling(non_stop=True))
+            print("📡 Telegram Remote: ENABLED")
+        except Exception as e: print(f"❌ TG Error: {e}")
+
+    # --- 🟣 DISCORD SECTION ---
+    dc_cfg = CONF.get('DISCORD_CONFIG', {})
+    if dc_cfg.get('remote_enable', False):
+        try:
+            intents = discord.Intents.default()
+            intents.message_content = True
+            dc_bot = commands.Bot(command_prefix="!", intents=intents)
+            DC_ADMIN_ID = dc_cfg.get('admin_id', 0)
+
+            @dc_bot.command(name="status")
+            async def dc_status(ctx):
+                if ctx.author.id == DC_ADMIN_ID: await ctx.send(get_status_text())
+
+            @dc_bot.command(name="log")
+            async def dc_log(ctx):
+                if ctx.author.id == DC_ADMIN_ID: await ctx.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
+
+            tasks.append(dc_bot.start(dc_cfg['remote_bot_token']))
+            print("📡 Discord Remote: ENABLED")
+        except Exception as e: print(f"❌ Discord Error: {e}")
+
+    if tasks: await asyncio.gather(*tasks)
+    else: print("⚠️ No services enabled.")
 
 if __name__ == "__main__":
-    print("🚀 Remote Bot is running...")
-    bot.infinity_polling()
+    try: asyncio.run(main())
+    except KeyboardInterrupt: print("🛑 Stopped.")
