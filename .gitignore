@@ -160,3 +160,5 @@ cython_debug/
 #.idea/
 config.json
 stats_cache.json
+seen.txt
+hash_seen.txt
