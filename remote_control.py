@@ -1,5 +1,6 @@
 import telebot
 from telebot import types
+import time
 import json
 import os
 import sys
@@ -11,9 +12,24 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 LOG_PATH = os.path.join(BASE_DIR, 'bot.log')
 
 def load_config():
+    # โครงสร้างพื้นฐานกรณีไม่มีไฟล์
+    default_config = {
+        "BEARBIT": {"user": "", "pass": ""},
+        "TELEGRAM_CONFIG": {
+            "remote_enable": True, 
+            "remote_bot_token": "YOUR_TOKEN", 
+            "chat_id": "YOUR_ID"
+        },
+        "SETTING": {"MIN_SIZE_GB": 1.0, "MAX_SIZE_GB": 500.0},
+        "NODES": []
+    }
+    
     if not os.path.exists(CONFIG_PATH):
-        print(f"❌ Error: ไม่พบไฟล์ {CONFIG_PATH}")
-        sys.exit(1)
+        print(f"⚠️ ไม่พบ {CONFIG_PATH} -> กำลังสร้างไฟล์เริ่มต้น...")
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(default_config, f, indent=4, ensure_ascii=False)
+        return default_config
+        
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -57,7 +73,7 @@ def settings_menu():
 
 def controls_menu():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add('🚀 Start Main Bot', '🚫 Stop Main Bot', '🔄 Restart Remote', '⬅️ Back to Main')
+    markup.add('🚀 Start Main Bot', '🚫 Stop Main Bot', '🔄 Restart Main Bot', '🔄 Restart Remote', '⬅️ Back to Main')
     return markup
 
 def is_process_running(name):
@@ -139,6 +155,33 @@ def handle_msg(message):
     elif message.text == '🚫 Stop Main Bot':
         os.system("pkill -15 -f 'python3 main.py'")
         bot.send_message(message.chat.id, "🛑 หยุดบอทหลักเรียบร้อย")
+
+    elif message.text == '🔄 Restart Main Bot':
+        bot.send_message(message.chat.id, "🔄 กำลังอัปเดตและรีสตาร์ทบอทหลัก...")
+        
+        # 1. ปิดตัวเก่า (SIGTERM เพื่อให้บอทส่งสถิติสุดท้ายก่อนปิด)
+        os.system("pkill -15 -f 'python3 main.py'")
+        time.sleep(3)
+        
+        # 2. ดึงโค้ดใหม่จาก Git
+        pull_cmd = f"cd {BASE_DIR} && git fetch --all && git reset --hard origin/main"
+        exit_code = os.system(pull_cmd)
+        
+        # 3. รันผ่านสคริปต์ Auto-Pilot เพื่อเช็ค Library ใหม่ๆ 
+        if os.name == 'posix': # Linux
+            run_cmd = f"cd {BASE_DIR} && chmod +x run_autopilot.sh && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
+        else: # Windows
+            run_cmd = f"start /b run_autopilot.bat"
+            
+        os.system(run_cmd)
+        
+        time.sleep(5)
+        if is_process_running("main.py"):
+            status = "✅ รีสตาร์ทบอทหลักสำเร็จ!"
+            if exit_code != 0: status += "\n⚠️ หมายเหตุ: อัปเดต Git ไม่สำเร็จ"
+            bot.send_message(message.chat.id, status)
+        else:
+            bot.send_message(message.chat.id, "❌ บอทไม่ทำงาน! โปรดเช็ค Log")
 
     elif message.text == '🔄 Restart Remote':
         bot.send_message(message.chat.id, "♻️ รีสตาร์ทรีโมท...")
