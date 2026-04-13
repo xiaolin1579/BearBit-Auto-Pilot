@@ -1,6 +1,15 @@
+# สื่อสารกับ API และ Webhook
 requests
-urllib3
+
+# จัดการข้อมูล HTML และ XML
 beautifulsoup4
+lxml
+
+# ระบบ Browser Engine (Playwright)
 playwright
-telebot
-time
+
+# รีโมทคอนโทรลผ่าน Telegram
+pyTelegramBotAPI
+
+# อื่นๆ
+urllib3

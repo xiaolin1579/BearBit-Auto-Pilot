@@ -23,7 +23,7 @@ if %errorlevel% neq 0 (
 :: แต่ถ้าอยากใช้ venv ก็ให้ลบโฟลเดอร์เก่าทิ้งก่อนรันสคริปต์นี้
 echo 📥 Installing Libraries...
 %PYTHON_EXE% -m pip install --upgrade pip
-%PYTHON_EXE% -m pip install requests urllib3 beautifulsoup4 playwright lxml
+%PYTHON_EXE% -m pip install -r requirements.txt
 
 echo 🌐 Installing Playwright Browser...
 %PYTHON_EXE% -m playwright install chromium

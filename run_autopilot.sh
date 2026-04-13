@@ -22,7 +22,7 @@ source "$VENV_PATH/bin/activate"
 # 3. ติดตั้ง Library ที่จำเป็น (เพิ่มส่วนนี้เข้าไป)
 echo "📥 Checking/Installing dependencies..."
 pip install --upgrade pip
-pip install requests urllib3 beautifulsoup4 playwright lxml
+pip install -r requirements.txt
 
 # 4. ติดตั้ง/ตรวจสอบ Playwright Browsers
 # เช็คว่ามี browser หรือยัง ถ้าไม่มีให้ติดตั้ง
