@@ -1,33 +1,56 @@
 @echo off
-title BearBit Remote Control Bot (VENV)
+title BearBit Remote Control Bot (VENV/Wine)
 cd /d "%~dp0"
+
+:: --- CONFIG PATH ---
+set LOG_FILE=remote_bot.log
 
 :: 1. สร้าง venv ถ้ายังไม่มี
 if not exist venv (
-    echo 📦 Creating Virtual Environment...
+    echo [%date% %time%] 📦 Creating Virtual Environment... >> %LOG_FILE%
     python -m venv venv
 )
 
-:: 2. กำหนด Path ของ Python ใน venv
-set VENV_PYTHON=venv\Scripts\python.exe
+:: 2. ตรวจสอบ Path ของ Python
+if exist "venv\Scripts\python.exe" (
+    set VENV_PYTHON=venv\Scripts\python.exe
+) else if exist "venv\bin\python" (
+    set VENV_PYTHON=venv\bin\python
+) else (
+    set VENV_PYTHON=python
+)
 
-:: 3. ติดตั้ง Library จาก requirements.txt
-echo 📥 Checking dependencies in venv...
-%VENV_PYTHON% -m pip install --upgrade pip
-%VENV_PYTHON% -m pip install -r requirements.txt
+:: 3. ติดตั้ง/อัปเดต Library
+echo [%date% %time%] 📥 Checking dependencies... >> %LOG_FILE%
+%VENV_PYTHON% -m pip install --upgrade pip >> %LOG_FILE% 2>&1
+if exist requirements.txt (
+    %VENV_PYTHON% -m pip install -r requirements.txt >> %LOG_FILE% 2>&1
+)
 
 :loop
+cls
+echo ==========================================
+echo   🚀 BearBit Remote Bot is Running
+echo   Mode: VENV (Wine Compatible)
+echo   Log: %LOG_FILE%
+echo   Time: %date% %time%
+echo ==========================================
+
+:: บันทึกเวลาเริ่มรันลง Log
+echo [%date% %time%] 🚀 Remote Bot Started. >> %LOG_FILE%
+
+:: 4. รันบอท (ใช้คำสั่งเพื่อแสดงผลหน้าจอ และบันทึกลงไฟล์พร้อมกัน)
+:: สำหรับ Windows/Wine มาตรฐาน การใช้ ">> file 2>&1" จะบันทึก Log ได้ดีที่สุด
+%VENV_PYTHON% remote_control.py >> %LOG_FILE% 2>&1
+
+echo.
 echo ------------------------------------------
-echo 🚀 Starting Remote Control Bot (VENV)...
-echo Time: %date% %time%
+echo ⚠️ Bot stopped or crashed at %time%
+echo 🔄 Restarting in 5 seconds...
 echo ------------------------------------------
 
-:: 4. รันบอท
-%VENV_PYTHON% remote_control.py
-
-echo ------------------------------------------
-echo ⚠️ Bot stopped/crashed. Restarting in 5 seconds...
-echo ------------------------------------------
+:: บันทึกเหตุการณ์หยุดทำงานลง Log
+echo [%date% %time%] ⚠️ Bot stopped/crashed. >> %LOG_FILE%
 
 timeout /t 5 >nul
 goto loop
