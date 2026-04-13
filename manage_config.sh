@@ -12,9 +12,15 @@ get_val() {
 update_json() {
     python3 -c "
 import json, os
-with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
-    d = json.load(f)
-$1
+# ถ้าไม่มีไฟล์ให้สร้าง dict เปล่าขึ้นมาเป็นโครงสร้างเริ่มต้น
+if not os.path.exists('$CONFIG_FILE'):
+    d = {'BEARBIT':{}, 'NODES':[], 'SETTING':{}, 'TELEGRAM_CONFIG':{}}
+else:
+    with open('$CONFIG_FILE', 'r', encoding='utf-8') as f:
+        d = json.load(f)
+
+$1  # รันคำสั่งแก้ไขที่ส่งมา
+
 with open('$CONFIG_FILE', 'w', encoding='utf-8') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
 "

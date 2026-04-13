@@ -2,6 +2,8 @@
 title BearBit Config Manager (Full System)
 setlocal enabledelayedexpansion
 
+:: --- ตรวจสอบ/สร้างไฟล์ config.json เริ่มต้น ---
+python -c "import json, os; CONFIG='config.json'; DEFAULT={'BEARBIT':{'username':'','password':'','target_urls':[]},'TELEGRAM_CONFIG':{'notify_enable':False,'main_bot_token':'','chat_id':''},'SETTING':{'MIN_SIZE_GB':15.0,'MAX_SIZE_GB':150.0,'FREELOAD_ENABLE':True,'MIN_FREE_PERCENT':0},'GLOBAL_CLEAN':{'enable':True,'min_ratio':1.0,'min_time':360,'max_time':1440},'NODES':[]}; d=json.load(open(CONFIG, encoding='utf-8')) if os.path.exists(CONFIG) else {}; [d.setdefault(k, v) for k, v in DEFAULT.items()]; json.dump(d, open(CONFIG, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)"
 :menu
 cls
 echo ======================================================
