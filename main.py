@@ -218,6 +218,15 @@ class QbitNode:
             return True
         except: return False
 
+    def reannounce_all(self):
+        """ สั่ง Re-announce ทุก Torrent ใน qBittorrent """
+        if not self.is_connected and not self.login(): return False
+        try:
+            # สั่ง reannounce ทุก hashes โดยส่งค่า 'all'
+            r = self.s.post(f"{self.url}/api/v2/torrents/reannounce", data={"hashes": "all"}, auth=self.auth, timeout=10)
+            return r.status_code == 200
+        except: return False
+
 class RtorrentNode:
     def __init__(self, cfg):
         self.name, self.url = cfg["name"], cfg["url"].rstrip("/")
@@ -267,6 +276,45 @@ class RtorrentNode:
             xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{t_hash}</string></value></param></params></methodCall>'
             return requests.post(self.url, data=xml, auth=self.auth, verify=False, timeout=10).status_code == 200
         except: return False
+
+    def reannounce_all(self):
+        """ สั่ง Re-announce ทุก Torrent ใน rTorrent โดยวนลูปส่ง XML-RPC """
+        if not self.is_connected and not self.login(): return False
+        try:
+            # ดึงรายชื่อ hashes ทั้งหมดก่อน
+            xml_list = '<?xml version="1.0"?><methodCall><methodName>download_list</methodName></methodCall>'
+            r_list = requests.post(self.url, data=xml_list, auth=self.auth, timeout=10, verify=False)
+            soup = BeautifulSoup(r_list.text, "xml")
+            hashes = [s.get_text() for s in soup.find_all("string")]
+            
+            # วนลูปสั่ง announce ทีละตัว (rTorrent มาตรฐาน)
+            for h in hashes:
+                xml_ann = f'<?xml version="1.0"?><methodCall><methodName>d.tracker_announce</methodName><params><param><value><string>{h}</string></value></param></params></methodCall>'
+                requests.post(self.url, data=xml_ann, auth=self.auth, timeout=5, verify=False)
+            return True
+        except: return False
+
+# ========================= UPDATE TRACKER =========================
+
+def update_trackers(node):
+    """ สั่งให้ Node อัปเดตข้อมูลไปยัง Tracker """
+    try:
+        # สมมติว่าคุณเพิ่ม method reannounce_all ใน Class ไว้แล้วตามที่คุยกันก่อนหน้า
+        if hasattr(node, 'reannounce_all'):
+            if node.reannounce_all():
+                print(f"  ✅ [{node.name}] Trackers re-announced.")
+                return True
+        else:
+            # กรณีไม่ได้เพิ่ม method ใน class สามารถใช้ logic นี้แทนได้
+            if isinstance(node, QbitNode):
+                node.s.post(f"{node.url}/api/v2/torrents/reannounce", data={"hashes": "all"}, auth=node.auth, timeout=10)
+            elif isinstance(node, RtorrentNode):
+                # logic rtorrent re-announce
+                pass
+            print(f"  ✅ [{node.name}] Sent re-announce request.")
+    except Exception as e:
+        print(f"  ⚠️ [{node.name}] Update trackers failed: {e}")
+    return False
 
 # ========================= AUTO CLEAN =========================
 
@@ -495,7 +543,7 @@ def get_bearbit_stats(page):
     except Exception as e:
         return f"⚠️ Stats Error: {str(e)}"
         
-# ========================= MAIN FUNCTIONS =========================
+# ========================= AUTO VOTE =========================
 
 def auto_vote_snatched(page):
     try:
@@ -515,6 +563,8 @@ def auto_vote_snatched(page):
         send_notify("🗳️ Vote session completed.")
     except Exception as e: print(f"❌ Vote Error: {e}")
 
+# ========================= MAIN FUNCTIONS =========================
+
 def main():
     startup_msg = "🚀 BearBit Auto-Pilot : Started"
     print(startup_msg); send_notify(startup_msg)
@@ -529,21 +579,33 @@ def main():
             active_nodes = []
             node_status_buffer = []
 
-            # 1. Node Section (Checking & Cleanup)
+            # 1. Node Section (Checking & Cleanup & Update Trackers)
             print("\n🔌 NODE STATUS CHECKING...")
             for n_cfg in CFG['NODES']:
                 if not n_cfg.get('enable'): continue
+                
+                # สร้าง Object ตามประเภทของ Node
                 node = RtorrentNode(n_cfg) if n_cfg.get("type") == "rtorrent" else QbitNode(n_cfg)
+
                 if node.login():
+                    # 1.1 จัดการลบไฟล์เก่า (Cleanup)
                     NodeCleaner(node, n_cfg.get('clean_settings', {}), global_clean).process()
                     time.sleep(2)
+                    # 1.2 สั่ง Re-announce Tracker (เพื่อให้ข้อมูล Upload/Download เป็นปัจจุบันที่สุด)
+                    node.reannounce_all()
+                    # 1.3 อัปเดตสถานะ Node (พื้นที่ว่าง/จำนวนงาน)
                     node.refresh_status()
                     active_nodes.append((node, n_cfg))
                     icon = "🟢"
                 else: icon = "❌"
                 line = f"{icon} [{node.name}] FREE {getattr(node,'free_gb',0):.1f}GB | {getattr(node,'stat_msg','N/A')}"
                 print(line); node_status_buffer.append(line)
-            
+                update_trackers(node)
+
+            if active_nodes:
+                print("⏳ Waiting 5s for trackers to sync with BearBit...")
+                time.sleep(5)
+
             if node_status_buffer:
                 send_notify("🔌 <b>Node Status Report</b>\n" + "\n".join(node_status_buffer))
 
@@ -574,7 +636,6 @@ def main():
 
                     if "logout.php" in page.content():
                         print("🔑 Login Success")
-                        
                         stats_report = get_bearbit_stats(page)
                         print(f"\n{stats_report}")
                         send_notify(f"📊 <b>BearBit Status Report</b>\n{stats_report}")
