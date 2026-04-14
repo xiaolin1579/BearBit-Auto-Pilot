@@ -11,6 +11,7 @@ playwright
 # รีโมทคอนโทรลผ่าน Telegram & Discord
 pyTelegramBotAPI
 discord.py
+psutil
 
 # อื่นๆ
 urllib3

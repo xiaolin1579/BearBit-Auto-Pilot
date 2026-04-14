@@ -9,6 +9,7 @@ import json
 import subprocess
 import time
 import re
+import psutil
 from datetime import datetime, timedelta
 
 # --- SETUP PATH & CONFIG ---
@@ -41,14 +42,77 @@ def is_process_running(name):
             return name in output
     except: return False
 
+def get_bot_runtime(script_name="main.py"):
+    """คำนวณเวลาที่บอททำงานมาแล้วจาก Process จริง"""
+    # ดึงเฉพาะ cmdline มาเช็คก่อน เพื่อประหยัดทรัพยากร
+    for proc in psutil.process_iter(['cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline') or []
+            if any(script_name in s for s in cmdline):
+                # ✅ ใช้ .create_time() แทนการเรียกผ่าน info['start_time']
+                create_time = proc.create_time() 
+                start_time = datetime.fromtimestamp(create_time)
+                duration = datetime.now() - start_time
+                
+                days = duration.days
+                hours, remainder = divmod(duration.seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                
+                if days > 0:
+                    return f"{days}d {hours}h {minutes}m"
+                return f"{hours}h {minutes}m {seconds}s"
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return "0s"
+
 def get_status_text():
     c = load_config()
     SET = c.get('SETTING', {})
     main_running = is_process_running("main.py")
-    return (f"📍 <b>System Status</b>\n"
-            f"• Main Bot: <code>{'🟢 Online' if main_running else '🔴 Offline'}</code>\n"
-            f"• Min-Max: <code>{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB</code>\n"
-            f"• Freeload Only: <code>{'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}</code>")
+
+    # ดึงค่า Run Time
+    runtime = get_bot_runtime("main.py") if main_running else "N/A"
+
+    # จัดรูปแบบข้อความ
+    lines = [
+        "📍 <b>System Status</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"• Main Bot: {'🟢 Online' if main_running else '🔴 Offline'}",
+        f"• Run Time: <code>{runtime}</code>",
+        f"• Min-Max: <code>{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB</code>",
+        f"• Freeload Only: {'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}",
+        "━━━━━━━━━━━━━━━━━━"
+    ]
+    return "\n".join(lines)
+
+def format_size(size_gb):
+    """
+    แปลงค่าจากหน่วยพื้นฐาน (GB) ให้เป็นหน่วยที่เหมาะสมที่สุดโดยอัตโนมัติ
+    รองรับตั้งแต่ KB ไปจนถึง PB
+    """
+    if size_gb == 0: return "0.00 GB"
+    
+    # แปลงจาก GB กลับไปเป็น Bytes ก่อนเพื่อให้เริ่มคำนวณจากหน่วยเล็กสุดได้แม่นยำ
+    # (หรือจะเริ่มจาก GB เลยก็ได้ แต่การเริ่มจากหน่วยกลางๆ จะทำให้หารง่ายกว่า)
+    units = ("B", "KB", "MB", "GB", "TB", "PB", "EB")
+    
+    # เริ่มต้นที่หน่วย GB (index 3 ในลิสต์ units)
+    current_size = float(abs(size_gb))
+    unit_index = 3 
+    
+    # ถ้าค่ามากกว่า 1024 ให้ขยับหน่วยขึ้น (เช่น GB -> TB)
+    while current_size >= 1024 and unit_index < len(units) - 1:
+        current_size /= 1024
+        unit_index += 1
+        
+    # ถ้าค่าน้อยกว่า 1 (แต่ไม่ใช่ 0) ให้ขยับหน่วยลง (เช่น GB -> MB)
+    while current_size < 1 and unit_index > 0:
+        current_size *= 1024
+        unit_index -= 1
+        
+    # คืนค่าพร้อมเครื่องหมาย (บวก/ลบ) ตามค่าเดิมที่ส่งมา
+    sign = "-" if size_gb < 0 else ""
+    return f"{sign}{current_size:.2f} {units[unit_index]}"
 
 def parse_size(size_str):
     try:
@@ -99,8 +163,12 @@ def get_historical_report():
                 n = parse_size(new_str)
                 o = parse_size(old_str)
                 diff = n - o
-                if diff > 0: return f"📈 +{diff:.2f} GB"
-                elif diff < 0: return f"📉 {diff:.2f} GB"
+                readable_val = format_size(diff)
+                
+                if diff > 0: 
+                    return f"📈 +{readable_val}"
+                elif diff < 0: 
+                    return f"📉 {readable_val}"
                 else: return "➖ 0.00 GB"
             except: return "➖ 0.00 GB"
 
@@ -290,22 +358,97 @@ async def main():
 
                 # --- Control Actions ---
                 elif txt == '🚀 Start Bot':
-                    if is_process_running("main.py"): await tg_bot.send_message(chat_id, "⚠️ บอทรันอยู่แล้ว")
+                    if is_process_running("main.py"):
+                        await tg_bot.send_message(chat_id, "⚠️ บอทหลักทำงานอยู่ในขณะนี้")
                     else:
-                        run_cmd = f"cd {BASE_DIR} && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &" if os.name != 'nt' else f'start /b "" "{os.path.join(BASE_DIR, "run_autopilot.bat")}"'
-                        os.system(run_cmd)
-                        await tg_bot.send_message(chat_id, "🚀 กำลังเริ่มบอท...")
+                        try:
+                            # 1. แจ้งก่อนเริ่มงาน
+                            await tg_bot.send_message(chat_id, "⏳ กำลังรันบอทหลัก...")
+
+                            if os.name != 'nt':  # Linux/Unix
+                                run_cmd = f"nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
+                                subprocess.Popen(run_cmd, shell=True, cwd=BASE_DIR, preexec_fn=os.setpgrp)
+                            else:  # Windows
+                                run_cmd = f'start /b "" "run_autopilot.bat"'
+                                subprocess.Popen(run_cmd, shell=True, cwd=BASE_DIR)
+
+                            # 2. หน่วงเวลาเพื่อให้ Process เริ่มทำงาน (3 วินาที)
+                            await asyncio.sleep(3)
+
+                            # 3. ตรวจสอบอีกรอบว่ารันสำเร็จหรือไม่
+                            if is_process_running("main.py"):
+                                await tg_bot.send_message(chat_id, "✅ บอทหลักทำงานแล้ว")
+                            else:
+                                await tg_bot.send_message(chat_id, "❌ <b>รันบอทไม่สำเร็จ:</b> ไม่พบโปรเซสในระบบ โปรดเช็ค Log", parse_mode='HTML')
+
+                        except Exception as e:
+                            await tg_bot.send_message(chat_id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
                 elif txt == '🚫 Stop Bot':
-                    stop_cmd = "pkill -15 -f 'main.py'" if os.name != 'nt' else 'taskkill /F /FI "IMAGENAME eq python.exe"'
-                    os.system(stop_cmd)
-                    await tg_bot.send_message(chat_id, "🛑 สั่งหยุดบอทหลักแล้ว")
+                    if not is_process_running("main.py"):
+                        await tg_bot.send_message(chat_id, "⚠️ บอทหลักไม่ได้ทำงานอยู่ในขณะนี้")
+                    else:
+                        try:
+                            await tg_bot.send_message(chat_id, "⏳ กำลังส่งสัญญาณหยุดบอทหลัก...")
+
+                            if os.name != 'nt':  # Linux/Unix
+                                # ใช้ SIGTERM (15) เพื่อให้บอทเคลียร์งานก่อนปิด หรือ SIGKILL (9) ถ้าต้องการปิดทันที
+                                stop_cmd = "pkill -15 -f 'main.py'"
+                                os.system(stop_cmd)
+                            else:  # Windows
+                                # ✅ แก้ไข: ใช้ WMIC หรือ Taskkill แบบระบุชื่อไฟล์สคริปต์
+                                # เพื่อไม่ให้มันไปฆ่า Python ตัวอื่นๆ (เช่น บอทรีโมทตัวนี้)
+                                stop_cmd = 'wmic process where "commandline like \'%main.py%\'" delete'
+                                os.system(stop_cmd)
+
+                            # หน่วงเวลาให้ระบบเคลียร์ Process
+                            await asyncio.sleep(3)
+
+                            # ตรวจสอบอีกครั้ง
+                            if not is_process_running("main.py"):
+                                await tg_bot.send_message(chat_id, "🛑 หยุดบอทหลักสำเร็จแล้ว")
+                            else:
+                                await tg_bot.send_message(chat_id, "❌ <b>ไม่สามารถหยุดบอทได้:</b> โปรเซสยังค้างอยู่ในระบบ", parse_mode='HTML')
+
+                        except Exception as e:
+                            await tg_bot.send_message(chat_id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
                 elif txt == '🔄 Restart & Update':
-                    await tg_bot.send_message(chat_id, "🔄 ปิดบอทและดึงโค้ดใหม่จาก Git...")
-                    os.system("pkill -15 -f 'main.py'")
-                    os.system(f"cd {BASE_DIR} && git fetch --all && git reset --hard origin/main")
-                    await asyncio.sleep(2)
-                    os.system(f"cd {BASE_DIR} && nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &")
-                    await tg_bot.send_message(chat_id, "✅ อัปเดตและเริ่มบอทใหม่เรียบร้อย")
+                    await tg_bot.send_message(chat_id, "⏳ กำลังเริ่มกระบวนการ Update...")
+
+                    try:
+                        # 1. ปิดบอทเดิมก่อน
+                        if is_process_running("main.py"):
+                            stop_cmd = "pkill -15 -f 'main.py'" if os.name != 'nt' else 'wmic process where "commandline like \'%main.py%\'" delete'
+                            os.system(stop_cmd)
+                            await asyncio.sleep(3) # รอให้ Process คลายตัว
+
+                        # 2. ดึงโค้ดใหม่จาก Git
+                        # ใช้ && เพื่อให้มั่นใจว่าคำสั่งถัดไปจะรันเมื่อคำสั่งก่อนหน้าสำเร็จเท่านั้น
+                        git_cmd = f"cd {BASE_DIR} && git fetch --all && git reset --hard origin/main"
+                        git_result = os.system(git_cmd)
+
+                        if git_result != 0:
+                            await tg_bot.send_message(chat_id, "⚠️ <b>Git Update Failed:</b> ตรวจสอบการเชื่อมต่อหรือ Git Conflict", parse_mode='HTML')
+                            # ไม่ควรไปต่อถ้ารีเซ็ตโค้ดไม่สำเร็จ
+                        else:
+                            await tg_bot.send_message(chat_id, "📥 ดึงโค้ดเวอร์ชันล่าสุดสำเร็จ... กำลังเริ่มบอทใหม่")
+
+                        # 3. รันบอทใหม่ (ใช้ Popen เพื่อความเสถียร)
+                        if os.name != 'nt':
+                            run_cmd = f"nohup ./run_autopilot.sh > {LOG_PATH} 2>&1 &"
+                            subprocess.Popen(run_cmd, shell=True, cwd=BASE_DIR, preexec_fn=os.setpgrp)
+                        else:
+                            run_cmd = 'start /b "" "run_autopilot.bat"'
+                            subprocess.Popen(run_cmd, shell=True, cwd=BASE_DIR)
+
+                        # 4. ตรวจสอบสถานะสุดท้าย
+                        await asyncio.sleep(5)
+                        if is_process_running("main.py"):
+                            await tg_bot.send_message(chat_id, "✅ <b>Update & Restart Success!</b>\nบอทหลักกลับมาทำงานปกติแล้ว", parse_mode='HTML')
+                        else:
+                            await tg_bot.send_message(chat_id, "❌ <b>Update Error:</b> บอทไม่ออนไลน์หลังอัปเดต โปรดตรวจสอบ Log")
+
+                    except Exception as e:
+                        await tg_bot.send_message(chat_id, f"❌ <b>Update System Error:</b> {str(e)}")
                 elif txt == '♻️ Restart Remote':
                     await tg_bot.send_message(chat_id, "♻️ รีสตาร์ท Remote...")
                     os._exit(0)
