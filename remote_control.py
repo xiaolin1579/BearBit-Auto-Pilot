@@ -502,7 +502,7 @@ async def main():
             intents.message_content = True  # สำคัญมาก ต้องเปิดใน Portal ด้วย
 
             # ใช้ prefix เป็น ! และรองรับการแท็ก
-            dc_bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents)
+            dc_bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents, help_command=None)
             DC_ADMIN_ID = int(dc_cfg.get('admin_id', 0))
 
             @dc_bot.event
@@ -547,6 +547,33 @@ async def main():
             async def dc_log(ctx):
                 if ctx.author.id == DC_ADMIN_ID:
                     await ctx.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
+
+            @dc_bot.command(name="help")
+            async def dc_help(ctx):
+                if ctx.author.id == DC_ADMIN_ID:
+                    embed = discord.Embed(
+                        title="🛠️ BearBit Discord Remote Help",
+                        description="รายการคำสั่งสำหรับการควบคุมและตรวจสอบระบบ",
+                        color=discord.Color.blue()
+                    )
+                    embed.add_field(
+                        name="📊 Monitoring", 
+                        value="`!status` - เช็คสถานะปัจจุบัน\n`!report` - ดูสถิติย้อนหลัง\n`!log` - ดู Log ล่าสุด", 
+                        inline=False
+                    )
+                    embed.add_field(
+                        name="🤖 Interaction", 
+                        value="แท็กบอท (@mention) แล้วตามด้วยคำว่า `status` หรือ `log` เพื่อสั่งงานแบบด่วนได้", 
+                        inline=False
+                    )
+                    embed.set_footer(text=f"Admin Only | ID: {DC_ADMIN_ID}")
+                    await ctx.send(embed=embed)
+
+            @dc_bot.event
+            async def on_command_error(ctx, error):
+                if isinstance(error, commands.CommandNotFound):
+                    if ctx.author.id == DC_ADMIN_ID:
+                        await ctx.send("❌ ไม่พบคำสั่งนี้! พิมพ์ `!help` เพื่อดูคำสั่งทั้งหมด")
 
             tasks.append(dc_bot.start(dc_cfg['remote_bot_token']))
         except Exception as e: print(f"❌ Discord Error: {e}")
