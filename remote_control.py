@@ -257,6 +257,21 @@ async def main():
                     await tg_bot.send_message(chat_id, "🏠 กลับหน้าหลัก", reply_markup=main_menu())
                 elif txt == '📄 View Log':
                     await tg_bot.send_message(chat_id, f"📄 **Last Log:**\n```\n{get_filtered_logs()}\n```", parse_mode='Markdown')
+                elif txt == '📁 Download Log':
+                    if os.path.exists(LOG_PATH):
+                        try:
+                            with open(LOG_PATH, 'rb') as f:
+                                # ✅ สำหรับ AsyncTeleBot ให้ส่ง f ไปตรงๆ
+                                # หากต้องการระบุชื่อไฟล์ให้ใช้ tuple (ชื่อไฟล์, ไฟล์ข้อมูล)
+                                await tg_bot.send_document(
+                                    chat_id,
+                                    document=(os.path.basename(LOG_PATH), f),
+                                    caption="📄 Full Log"
+                                )
+                        except Exception as e:
+                            await tg_bot.send_message(chat_id, f"❌ เกิดข้อผิดพลาดในการส่งไฟล์: {e}")
+                    else:
+                        await tg_bot.send_message(chat_id, "❌ ไม่พบไฟล์ Log")
 
                 # --- Config Actions ---
                 elif txt == '📏 Set Min Size':
