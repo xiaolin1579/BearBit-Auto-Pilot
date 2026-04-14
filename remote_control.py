@@ -30,6 +30,7 @@ def save_config(config):
     with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
+
 # --- SHARED FUNCTIONS ---
 def is_process_running(name):
     try:
@@ -41,6 +42,12 @@ def is_process_running(name):
             output = subprocess.check_output(["ps", "aux"]).decode()
             return name in output
     except: return False
+
+def update_config_value(key, value):
+    c = load_config()
+    if 'SETTING' not in c: c['SETTING'] = {}
+    c['SETTING'][key] = value
+    save_config(c)
 
 def get_bot_runtime(script_name="main.py"):
     """คำนวณเวลาที่บอททำงานมาแล้วจาก Process จริง"""
@@ -70,19 +77,31 @@ def get_status_text():
     SET = c.get('SETTING', {})
     main_running = is_process_running("main.py")
 
+    # ดึงค่า Config ต่างๆ
+    is_freeload = SET.get('FREELOAD_ENABLE', False)
+    min_gb = SET.get('MIN_SIZE_GB', 0)
+    max_gb = SET.get('MAX_SIZE_GB', 0)
+    min_percent = SET.get('MIN_PERCENT', 0) # สมมติว่าใช้คีย์นี้เก็บ %
+
     # ดึงค่า Run Time
     runtime = get_bot_runtime("main.py") if main_running else "N/A"
 
-    # จัดรูปแบบข้อความ
+    # จัดรูปแบบข้อความเริ่มต้น
     lines = [
         "📍 <b>System Status</b>",
         "━━━━━━━━━━━━━━━━━━",
         f"• Main Bot: {'🟢 Online' if main_running else '🔴 Offline'}",
         f"• Run Time: <code>{runtime}</code>",
-        f"• Min-Max: <code>{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB</code>",
-        f"• Freeload Only: {'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}",
-        "━━━━━━━━━━━━━━━━━━"
+        f"• Min-Max: <code>{min_gb} - {max_gb} GB</code>",
+        f"• Freeload Only: {'✅ Yes' if is_freeload else '❌ No'}"
     ]
+
+    # ✅ เงื่อนไข: แสดง Freeload Percent เฉพาะเมื่อ Freeload Only เป็น Yes เท่านั้น
+    if is_freeload:
+        lines.append(f"• Freeload Percent: <code>{min_percent}%</code>")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
     return "\n".join(lines)
 
 def format_size(size_gb):
@@ -259,8 +278,7 @@ async def main():
 
             def settings_menu():
                 m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-                m.add('📏 Set Min Size', '📐 Set Max Size')
-                m.add('♻️ Toggle Freeload', '⬅️ Back')
+                m.add('📏 Set Min Size', '📐 Set Max Size', '♻️ Toggle Freeload', '📊 Set Min %', '⬅️ Back')
                 return m
 
             def controls_menu():
@@ -303,7 +321,9 @@ async def main():
                         elif state == "WAIT_MAX":
                             c['SETTING']['MAX_SIZE_GB'] = val
                             await tg_bot.send_message(chat_id, f"✅ อัปเดต Max Size: `{val}` GB", parse_mode='Markdown', reply_markup=settings_menu())
-
+                        elif state == "WAIT_PERCENT": # ✅ รับค่า %
+                            c['SETTING']['MIN_PERCENT'] = int(val)
+                            await tg_bot.send_message(chat_id, f"✅ อัปเดต Freeload Percent: `{val}` %", parse_mode='Markdown',reply_markup=settings_menu())
                         save_config(c)
                         del user_states[chat_id]
                         return
@@ -318,9 +338,21 @@ async def main():
                 elif txt == '📈 Stats Report':
                     await tg_bot.send_message(chat_id, get_historical_report(), parse_mode='HTML')
                 elif txt == '⚙️ Config Settings':
-                    await tg_bot.send_message(chat_id, "🛠️ ตั้งค่าการกรองไฟล์", reply_markup=settings_menu())
+                    c = load_config().get('SETTING', {})
+                    status_free = "✅ ON" if c.get('FREELOAD_ENABLE', True) else "❌ OFF"
+                    min_p = c.get('MIN_PERCENT', 0)
+                    
+                    msg = (f"🛠️ **Settings Menu**\n"
+                           f"━━━━━━━━━━━━━━━━━━\n"
+                           f"• Freeload: `{status_free}`\n"
+                           f"• Min Percent: `{min_p}%`\n"
+                           f"━━━━━━━━━━━━━━━━━━\n"
+                           f"เลือกหัวข้อที่ต้องการปรับเปลี่ยน:")
+                    await tg_bot.send_message(chat_id, msg, parse_mode='Markdown', reply_markup=settings_menu())
+
                 elif txt == '🎮 Bot Controls':
                     await tg_bot.send_message(chat_id, "🕹️ ควบคุมระบบ", reply_markup=controls_menu())
+
                 elif txt == '⬅️ Back':
                     await tg_bot.send_message(chat_id, "🏠 กลับหน้าหลัก", reply_markup=main_menu())
                 elif txt == '📄 View Log':
@@ -348,14 +380,18 @@ async def main():
                 elif txt == '📐 Set Max Size':
                     user_states[chat_id] = "WAIT_MAX"
                     await tg_bot.send_message(chat_id, "📐 ส่งตัวเลขขนาดไฟล์ **สูงสุด** (GB):", reply_markup=types.ReplyKeyboardRemove())
+                elif txt == '📊 Set Min %': # คุณต้องไปเพิ่มปุ่มนี้ใน settings_menu()
+                    user_states[chat_id] = "WAIT_PERCENT"
+                    await tg_bot.send_message(chat_id, "📊 ส่งตัวเลข **% ขั้นต่ำ** ที่ต้องการ (เช่น 10):", reply_markup=types.ReplyKeyboardRemove())
+
                 elif txt == '♻️ Toggle Freeload':
                     c = load_config()
                     if 'SETTING' not in c: c['SETTING'] = {}
                     curr = c['SETTING'].get('FREELOAD_ENABLE', True)
-                    c['SETTING']['FREELOAD_ENABLE'] = not curr
+                    new_val = not curr
+                    c['SETTING']['FREELOAD_ENABLE'] = new_val
                     save_config(c)
-                    await tg_bot.send_message(chat_id, f"✅ Freeload: `{'ON' if not curr else 'OFF'}`", parse_mode='Markdown')
-
+                    await tg_bot.send_message(chat_id, f"♻️ เปลี่ยนโหมด Freeload เป็น: `{'✅ ON' if new_val else '❌ OFF'}`", parse_mode='Markdown')
                 # --- Control Actions ---
                 elif txt == '🚀 Start Bot':
                     if is_process_running("main.py"):
