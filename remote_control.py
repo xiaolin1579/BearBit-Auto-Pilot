@@ -76,7 +76,6 @@ def get_filtered_logs(n=15):
 
 def get_historical_report():
     try:
-        # ตรวจสอบว่ามีไฟล์ไหมก่อนเปิด
         if not os.path.exists(STATS_HISTORY_FILE):
             return "⚠️ ยังไม่มีไฟล์ประวัติสถิติในขณะนี้"
 
@@ -92,18 +91,18 @@ def get_historical_report():
             return "⚠️ ยังไม่มีข้อมูลประวัติสำหรับชั่วโมงนี้"
 
         curr = snapshot.get('data')
-        # ✅ แก้ไข: ใช้ user_display ที่ดึงมาจาก curr
         user_display = curr.get('username', 'BearBit User')
 
-        # ฟังก์ชันคำนวณส่วนต่าง
         def calc_diff(new_str, old_str):
-            if not new_str or not old_str: return "0.00 GB"
+            if not new_str or not old_str: return "➖ 0.00 GB"
             try:
                 n = parse_size(new_str)
                 o = parse_size(old_str)
                 diff = n - o
-                return f"+{diff:.2f} GB" if diff > 0 else "0.00 GB"
-            except: return "0.00 GB"
+                if diff > 0: return f"📈 +{diff:.2f} GB"
+                elif diff < 0: return f"📉 {diff:.2f} GB"
+                else: return "➖ 0.00 GB"
+            except: return "➖ 0.00 GB"
 
         # 2. ข้อมูลย้อนหลัง 1 ชม.
         prev_hour = (now - timedelta(hours=1)).strftime("%H")
@@ -111,47 +110,58 @@ def get_historical_report():
         up_diff_h1 = calc_diff(curr['up'], h1['up']) if h1 else "N/A"
         dl_diff_h1 = calc_diff(curr['dl'], h1['dl']) if h1 else "N/A"
 
-        # 3. ข้อมูลย้อนหลัง 24 ชม. (เปรียบเทียบกับค่าในชั่วโมงเดียวกันของเมื่อวาน)
-        # เนื่องจากเราเขียนทับไฟล์เดิมทุก 24 ชม. ค่าที่ค้างอยู่ใน Key นี้ก่อนจะถูกบอทหลักเซฟทับ
-        # ก็คือค่าที่บันทึกไว้ ณ เวลาเดียวกันของเมื่อวานนั่นเอง
-        h24 = history.get(curr_hour, {}).get('data')
+        # 3. ⚡ ข้อมูลย้อนหลัง (Accumulated/24 Hours)
+        # หาเวลาที่เก่าที่สุดที่มีในไฟล์ history เพื่อใช้เป็นจุดตั้งต้น
+        all_snapshots = []
+        for h in history:
+            t_str = history[h].get('time', '')
+            if t_str:
+                t_obj = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+                all_snapshots.append((t_obj, history[h].get('data')))
 
-        # เราต้องเช็คด้วยว่า timestamp ใน snapshot นั้นเก่าพอไหม (ไม่ใช่พึ่งเซฟเมื่อนาทีที่แล้ว)
-        last_time_str = history.get(curr_hour, {}).get('time', '')
-        if last_time_str:
-            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
-            # ถ้าข้อมูลในไฟล์เก่ากว่า 20 ชม. แสดงว่าเป็นของเมื่อวานชัวร์ๆ
-            if (now - last_time).total_seconds() > 72000:
-                 up_diff_h24 = calc_diff(curr['up'], h24['up'])
-                 dl_diff_h24 = calc_diff(curr['dl'], h24['dl'])
+        # เรียงลำดับตามเวลา (เก่าไปใหม่)
+        all_snapshots.sort(key=lambda x: x[0])
+
+        if all_snapshots:
+            oldest_time, oldest_data = all_snapshots[0]
+            time_diff = (now - oldest_time).total_seconds()
+
+            # ถ้าข้อมูลเก่าสุดนั้นมีอายุมากกว่า 10 นาที (ป้องกันลบกับตัวเองในนาทีแรก)
+            if time_diff > 600:
+                up_diff_24h = calc_diff(curr['up'], oldest_data['up'])
+                dl_diff_24h = calc_diff(curr['dl'], oldest_data['dl'])
+
+                # เปลี่ยนหัวข้อตามระยะเวลาที่มีข้อมูล
+                if time_diff < 82800: # ยังไม่ครบ 23 ชม.
+                    label_24h = f"⏳ <b>Accumulated ({int(time_diff//3600)}h {int((time_diff%3600)//60)}m)</b>"
+                else:
+                    label_24h = "📅 <b>Last 24 Hours</b>"
             else:
-                 up_diff_h24 = "Collecting..." # รอให้ครบรอบวัน
-                 dl_diff_h24 = "Collecting..." # รอให้ครบรอบวัน
+                up_diff_24h = dl_diff_24h = "Collecting..."
+                label_24h = "📅 <b>Last 24 Hours</b>"
         else:
-            diff_h24 = "N/A"
+            up_diff_24h = dl_diff_24h = "N/A"
+            label_24h = "📅 <b>Last 24 Hours</b>"
 
         msg = [
             "📊 <b>BearBit 24H Performance</b>",
             "━━━━━━━━━━━━━━━━━━",
-            f"👤 <b>User:</b> <code>{user_display}</code>", # ✅ เปลี่ยนเป็น user_display
-            f"⬆️ Uploaded: <code>{curr['up']}</code>",
-            f"⬆️ Downloaded: <code>{curr['dl']}</code>",
+            f"👤 <b>User:</b> <code>{user_display}</code>",
+            f"📤 Uploaded: <code>{curr['up']}</code>",
+            f"📥 Downloaded: <code>{curr['dl']}</code>",
             f"💰 Bonus: <code>{curr['bonus']}</code>",
             "━━━━━━━━━━━━━━━━━━",
-            f"⚡ <b>Last 1 Hour</b>", # ✅ ประกาศตัวแปรแล้ว
-            f"⬆️ Uploaded: <code>{up_diff_h1}</code>",
-            f"⬆️ Downloaded: <code>{dl_diff_h1}</code>",
-            "━━━━━━━━━━━━━━━━━━"
-
-            f"📅 <b>Last 24 Hours</b>", # ✅ ประกาศตัวแปรแล้ว
-            f"⬆️ Uploaded: <code>{curr['up']}</code>",
-            f"⬆️ Downloaded: <code>{curr['dl']}</code>",
+            "⚡ <b>Last 1 Hour</b>",
+            f"  └ 📤 {up_diff_h1}",
+            f"  └ 📥 {dl_diff_h1}",
+            "━━━━━━━━━━━━━━━━━━",
+            f"{label_24h}", # ใช้ Label ที่คำนวณไว้
+            f"  └ 📤 {up_diff_24h}",
+            f"  └ 📥 {dl_diff_24h}",
             "━━━━━━━━━━━━━━━━━━"
         ]
         return "\n".join(msg)
     except Exception as e:
-        import traceback
-        print(traceback.format_exc()) # ดู error ละเอียดใน console
         return f"⚠️ Error: {str(e)}"
 
 def format_report(report_raw, platform='tg'):
