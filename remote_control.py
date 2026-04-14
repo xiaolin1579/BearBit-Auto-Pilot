@@ -8,11 +8,14 @@ import os
 import json
 import subprocess
 import time
+import re
+from datetime import datetime, timedelta
 
 # --- SETUP PATH & CONFIG ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 LOG_PATH = os.path.join(BASE_DIR, 'script_run.log')
+STATS_HISTORY_FILE = os.path.join(BASE_DIR, "stats_history.json")
 
 # ตัวแปรเก็บสถานะการทำงานของ User (สำหรับ Async)
 user_states = {} # { chat_id: "WAITING_MIN_SIZE" }
@@ -42,10 +45,20 @@ def get_status_text():
     c = load_config()
     SET = c.get('SETTING', {})
     main_running = is_process_running("main.py")
-    return (f"📍 **System Status**\n"
-            f"• Main Bot: `{'🟢 Online' if main_running else '🔴 Offline'}`\n"
-            f"• Min-Max: `{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB`\n"
-            f"• Freeload Only: `{'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}`")
+    return (f"📍 <b>System Status</b>\n"
+            f"• Main Bot: <code>{'🟢 Online' if main_running else '🔴 Offline'}</code>\n"
+            f"• Min-Max: <code>{SET.get('MIN_SIZE_GB')} - {SET.get('MAX_SIZE_GB')} GB</code>\n"
+            f"• Freeload Only: <code>{'✅ Yes' if SET.get('FREELOAD_ENABLE') else '❌ No'}</code>")
+
+def parse_size(size_str):
+    try:
+        size_str = size_str.upper().replace(',', '')
+        match = re.search(r"([0-9.]+)\s*(TB|GB|MB|KB|GIB|MIB|TIB)", size_str)
+        if not match: return 0.0
+        num, unit = float(match.group(1)), match.group(2)
+        factors = {"TB": 1024, "TIB": 1024, "GB": 1, "GIB": 1, "MB": 1/1024, "MIB": 1/1024}
+        return num * factors.get(unit, 1)
+    except: return 0.0
 
 def get_filtered_logs(n=15):
     if not os.path.exists(LOG_PATH): return "❌ ไม่พบไฟล์ Log"
@@ -60,6 +73,93 @@ def get_filtered_logs(n=15):
         filtered = [l for l in lines if "Next cycle in" not in l and l.strip() != ""]
         return "\n".join(filtered[-n:])
     except: return "⚠️ อ่าน Log ขัดข้อง"
+
+def get_historical_report():
+    try:
+        # ตรวจสอบว่ามีไฟล์ไหมก่อนเปิด
+        if not os.path.exists(STATS_HISTORY_FILE):
+            return "⚠️ ยังไม่มีไฟล์ประวัติสถิติในขณะนี้"
+
+        with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+
+        now = datetime.now()
+        curr_hour = now.strftime("%H")
+
+        # 1. ข้อมูลปัจจุบัน
+        snapshot = history.get(curr_hour)
+        if not snapshot:
+            return "⚠️ ยังไม่มีข้อมูลประวัติสำหรับชั่วโมงนี้"
+
+        curr = snapshot.get('data')
+        # ✅ แก้ไข: ใช้ user_display ที่ดึงมาจาก curr
+        user_display = curr.get('username', 'BearBit User')
+
+        # ฟังก์ชันคำนวณส่วนต่าง
+        def calc_diff(new_str, old_str):
+            if not new_str or not old_str: return "0.00 GB"
+            try:
+                n = parse_size(new_str)
+                o = parse_size(old_str)
+                diff = n - o
+                return f"+{diff:.2f} GB" if diff > 0 else "0.00 GB"
+            except: return "0.00 GB"
+
+        # 2. ข้อมูลย้อนหลัง 1 ชม.
+        prev_hour = (now - timedelta(hours=1)).strftime("%H")
+        h1 = history.get(prev_hour, {}).get('data')
+        up_diff_h1 = calc_diff(curr['up'], h1['up']) if h1 else "N/A"
+        dl_diff_h1 = calc_diff(curr['dl'], h1['dl']) if h1 else "N/A"
+
+        # 3. ข้อมูลย้อนหลัง 24 ชม. (เปรียบเทียบกับค่าในชั่วโมงเดียวกันของเมื่อวาน)
+        # เนื่องจากเราเขียนทับไฟล์เดิมทุก 24 ชม. ค่าที่ค้างอยู่ใน Key นี้ก่อนจะถูกบอทหลักเซฟทับ
+        # ก็คือค่าที่บันทึกไว้ ณ เวลาเดียวกันของเมื่อวานนั่นเอง
+        h24 = history.get(curr_hour, {}).get('data')
+
+        # เราต้องเช็คด้วยว่า timestamp ใน snapshot นั้นเก่าพอไหม (ไม่ใช่พึ่งเซฟเมื่อนาทีที่แล้ว)
+        last_time_str = history.get(curr_hour, {}).get('time', '')
+        if last_time_str:
+            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+            # ถ้าข้อมูลในไฟล์เก่ากว่า 20 ชม. แสดงว่าเป็นของเมื่อวานชัวร์ๆ
+            if (now - last_time).total_seconds() > 72000:
+                 up_diff_h24 = calc_diff(curr['up'], h24['up'])
+                 dl_diff_h24 = calc_diff(curr['dl'], h24['dl'])
+            else:
+                 up_diff_h24 = "Collecting..." # รอให้ครบรอบวัน
+                 dl_diff_h24 = "Collecting..." # รอให้ครบรอบวัน
+        else:
+            diff_h24 = "N/A"
+
+        msg = [
+            "📊 <b>BearBit 24H Performance</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"👤 <b>User:</b> <code>{user_display}</code>", # ✅ เปลี่ยนเป็น user_display
+            f"⬆️ Uploaded: <code>{curr['up']}</code>",
+            f"⬆️ Downloaded: <code>{curr['dl']}</code>",
+            f"💰 Bonus: <code>{curr['bonus']}</code>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"⚡ <b>Last 1 Hour</b>", # ✅ ประกาศตัวแปรแล้ว
+            f"⬆️ Uploaded: <code>{up_diff_h1}</code>",
+            f"⬆️ Downloaded: <code>{dl_diff_h1}</code>",
+            "━━━━━━━━━━━━━━━━━━"
+
+            f"📅 <b>Last 24 Hours</b>", # ✅ ประกาศตัวแปรแล้ว
+            f"⬆️ Uploaded: <code>{curr['up']}</code>",
+            f"⬆️ Downloaded: <code>{curr['dl']}</code>",
+            "━━━━━━━━━━━━━━━━━━"
+        ]
+        return "\n".join(msg)
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc()) # ดู error ละเอียดใน console
+        return f"⚠️ Error: {str(e)}"
+
+def format_report(report_raw, platform='tg'):
+    if platform == 'dc':
+        # เปลี่ยน HTML เป็น Markdown สำหรับ Discord
+        return report_raw.replace('<b>', '**').replace('</b>', '**')\
+                         .replace('<code>', '`').replace('</code>', '`')
+    return report_raw # ส่ง HTML ไปตามปกติสำหรับ Telegram
 
 # --- MAIN RUNNER ---
 async def main():
@@ -76,7 +176,7 @@ async def main():
 
             def main_menu():
                 m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-                m.add('📊 Status Check', '⚙️ Config Settings', '📄 View Log', '📁 Download Log', '🎮 Bot Controls')
+                m.add('📊 Status Check', '📈 Stats Report', '⚙️ Config Settings', '📄 View Log', '📁 Download Log', '🎮 Bot Controls')
                 return m
 
             def settings_menu():
@@ -136,7 +236,9 @@ async def main():
 
                 # --- 2. เมนูหลัก ---
                 if txt == '📊 Status Check':
-                    await tg_bot.send_message(chat_id, get_status_text(), parse_mode='Markdown')
+                    await tg_bot.send_message(chat_id, get_status_text(), parse_mode='HTML')
+                elif txt == '📈 Stats Report':
+                    await tg_bot.send_message(chat_id, get_historical_report(), parse_mode='HTML')
                 elif txt == '⚙️ Config Settings':
                     await tg_bot.send_message(chat_id, "🛠️ ตั้งค่าการกรองไฟล์", reply_markup=settings_menu())
                 elif txt == '🎮 Bot Controls':
@@ -230,7 +332,12 @@ async def main():
             @dc_bot.command(name="status")
             async def dc_status(ctx):
                 if ctx.author.id == DC_ADMIN_ID:
-                    await ctx.send(get_status_text())
+                    await ctx.send(format_report(get_status_text(), platform='dc'))
+
+            @dc_bot.command(name="report")
+            async def dc_status(ctx):
+                if ctx.author.id == DC_ADMIN_ID:
+                    await ctx.send(format_report(get_historical_report(), platform='dc'))
 
             @dc_bot.command(name="log")
             async def dc_log(ctx):

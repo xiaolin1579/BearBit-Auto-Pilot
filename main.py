@@ -11,6 +11,7 @@ import signal
 import sys
 import platform
 import shutil
+from datetime import datetime
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -46,6 +47,7 @@ SEEN_FILE = os.path.join(BASE_DIR, "seen.txt")
 HASH_SEEN_FILE = os.path.join(BASE_DIR, "hash_seen.txt")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 STATS_CACHE_FILE = os.path.join(BASE_DIR, "stats_cache.json")
+STATS_HISTORY_FILE = os.path.join(BASE_DIR, "stats_history.json")
 
 def load_full_config():
     if not os.path.exists(CONFIG_PATH):
@@ -272,10 +274,22 @@ class RtorrentNode:
         except: return False
 
     def delete_torrent(self, t_hash):
+        #สิ่งที่ต้องเพิ่มใน .rtorrent.rc
+        #ให้เพิ่มบรรทัดนี้ไว้ก่อนบรรทัด # -- END HERE --:
+        #method.set_key = event.download.erased,delete_tied,"execute={rm,-rf,--,$d.base_path=}"
+        """ส่งคำสั่ง d.erase เพียงอย่างเดียว แล้วปล่อยให้ Server ลบไฟล์เอง"""
         try:
-            xml = f'<?xml version="1.0"?><methodCall><methodName>d.erase</methodName><params><param><value><string>{t_hash}</string></value></param></params></methodCall>'
-            return requests.post(self.url, data=xml, auth=self.auth, verify=False, timeout=10).status_code == 200
-        except: return False
+            xml = (
+                f'<?xml version="1.0"?>'
+                f'<methodCall>'
+                f'<methodName>d.erase</methodName>'
+                f'<params><param><value><string>{t_hash}</string></value></param></params>'
+                f'</methodCall>'
+            )
+            response = requests.post(self.url, data=xml, auth=self.auth, verify=False, timeout=10)
+            return response.status_code == 200
+        except:
+            return False
 
     def reannounce_all(self):
         """ สั่ง Re-announce ทุก Torrent ใน rTorrent โดยวนลูปส่ง XML-RPC """
@@ -459,6 +473,28 @@ class NodeCleaner:
 
 # ========================= BEARBIT STATUS =========================
 
+def save_hourly_snapshot(current_data):
+    """บันทึกสถิติแยกตามชั่วโมงเพื่อดูย้อนหลัง"""
+    try:
+        try:
+            with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        except: history = {}
+
+        # ใช้ชั่วโมง (00-23) เป็น Key
+        hour_key = datetime.now().strftime("%H")
+
+        # เก็บค่าดิบ (Raw Data) และ Timestamp
+        history[hour_key] = {
+            'data': current_data,
+            'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        with open(STATS_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=4)
+    except Exception as e:
+        print(f"Log History Error: {e}")
+
 def get_stats_diff(current_data):
     """เปรียบเทียบค่าปัจจุบันกับค่าที่บันทึกไว้ (รองรับการแปลงหน่วย TB/GB/MB)"""
     diff_msg = ""
@@ -522,6 +558,7 @@ def get_bearbit_stats(page):
 
         if ratio and up and dl:
             curr_data = {
+                'username': username,
                 'ratio': ratio.group(1),
                 'up': up.group(1),
                 'dl': dl.group(1),
@@ -536,6 +573,7 @@ def get_bearbit_stats(page):
                 f"💰 Bonus: {curr_data['bonus']} "
                 f"{' |' + diff_text.replace('📊 <b>Changes:</b>', '🔄') if diff_text else ''}"
             )
+            save_hourly_snapshot(curr_data)
             return stats_msg
 
         return "⚠️ ไม่สามารถดึงสถิติได้"
