@@ -81,7 +81,7 @@ def get_status_text():
     is_freeload = SET.get('FREELOAD_ENABLE', False)
     min_gb = SET.get('MIN_SIZE_GB', 0)
     max_gb = SET.get('MAX_SIZE_GB', 0)
-    min_percent = SET.get('MIN_PERCENT', 0) # สมมติว่าใช้คีย์นี้เก็บ %
+    min_percent = SET.get('MIN_FREE_PERCENT', 0) # สมมติว่าใช้คีย์นี้เก็บ %
 
     # ดึงค่า Run Time
     runtime = get_bot_runtime("main.py") if main_running else "N/A"
@@ -322,7 +322,7 @@ async def main():
                             c['SETTING']['MAX_SIZE_GB'] = val
                             await tg_bot.send_message(chat_id, f"✅ อัปเดต Max Size: `{val}` GB", parse_mode='Markdown', reply_markup=settings_menu())
                         elif state == "WAIT_PERCENT": # ✅ รับค่า %
-                            c['SETTING']['MIN_PERCENT'] = int(val)
+                            c['SETTING']['MIN_FREE_PERCENT'] = int(val)
                             await tg_bot.send_message(chat_id, f"✅ อัปเดต Freeload Percent: `{val}` %", parse_mode='Markdown',reply_markup=settings_menu())
                         save_config(c)
                         del user_states[chat_id]
@@ -340,7 +340,7 @@ async def main():
                 elif txt == '⚙️ Config Settings':
                     c = load_config().get('SETTING', {})
                     status_free = "✅ ON" if c.get('FREELOAD_ENABLE', True) else "❌ OFF"
-                    min_p = c.get('MIN_PERCENT', 0)
+                    min_p = c.get('MIN_FREE_PERCENT', 0)
                     
                     msg = (f"🛠️ **Settings Menu**\n"
                            f"━━━━━━━━━━━━━━━━━━\n"

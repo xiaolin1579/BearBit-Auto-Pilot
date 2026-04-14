@@ -603,6 +603,23 @@ def auto_vote_snatched(page):
 
 # ========================= MAIN FUNCTIONS =========================
 
+def generate_main_status(config):
+    SET = config.get('SETTING', {})
+    
+    # ดึงค่าและกำหนดค่าเริ่มต้น (Default) ให้ตรงกับที่คุณระบุ
+    min_gb = SET.get('MIN_SIZE_GB', 5.0)
+    max_gb = SET.get('MAX_SIZE_GB', 150.0)
+    is_freeload = SET.get('FREELOAD_ENABLE', True)
+    min_percent = SET.get('MIN_FREE_PERCENT', 0) # ใช้ชื่อ Key ให้ตรงกับใน loop สแกน
+
+    # จัดรูปแบบข้อความ
+    status_text = "เปิด" if is_freeload else "ปิด"
+    # แสดง % เฉพาะตอนเปิดเท่านั้น
+    freeload_info = f" (ขั้นต่ำ: {min_percent}%)" if is_freeload else ""
+    
+    # คืนค่าบรรทัดเงื่อนไขตาม Format ที่ต้องการ
+    return f"⚙️ เงื่อนไข: ขนาด {min_gb:.1f}-{max_gb:.1f}GB | ฟรีโหลด {status_text}{freeload_info}"
+
 def main():
     startup_msg = "🚀 BearBit Auto-Pilot : Started"
     print(startup_msg); send_notify(startup_msg)
@@ -697,8 +714,10 @@ def main():
                                 target_url, display_zone = target_item, "Zone"
 
                             print(f"\n🌐 Scanning: [{display_zone}]")
-                            print(f"⚙️ เงื่อนไข: ขนาด {SET.get('MIN_SIZE_GB', 0)}-{SET.get('MAX_SIZE_GB', 999)}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}")
-                        
+
+                            status_line = generate_main_status(CFG) 
+                            print(status_line)                        
+                            
                             if not safe_goto(target_url): continue
                             
                             soup = BeautifulSoup(page.content(), "html.parser")
@@ -763,8 +782,9 @@ def main():
                             # 📊 สรุปหลังจบแต่ละโซน (อยู่นอก Row loop แต่อยู่ใน Zone loop)
                             # ======================================================
                             if len(added_in_zone) > 0 or count_skip > 0:
+                                condition_header = generate_main_status(CFG)
                                 summary_msg = (
-                                    f"⚙️ <b>เงื่อนไข:</b> ขนาด {SET.get('MIN_SIZE_GB', 0):.1f}-{SET.get('MAX_SIZE_GB', 999):.1f}GB | ฟรีโหลด {'เปิด' if SET.get('FREELOAD_ENABLE') else 'ปิด'}\n"
+                                    f"️ <b>{condition_header}</b>\n"
                                     f"🌐 <b>Scanning:</b> [{display_zone}] {target_url}\n\n"
                                 )
 
