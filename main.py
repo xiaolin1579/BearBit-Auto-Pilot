@@ -338,138 +338,138 @@ class NodeCleaner:
         self.node_cfg = node_clean_cfg or {}
         self.global_cfg = global_clean_cfg or {}
 
-    def process(self):
+    def process(self, force_emergency=False):
+        """
+        ระบบตรวจสอบและลบทอร์เรนต์ที่หมดอายุ
+        :param force_emergency: บังคับใช้โหมดลบด่วน (ใช้เมื่อต้องการคืนพื้นที่ทันที)
+        """
         node_enable = self.node_cfg.get('enable')
         global_enable = self.global_cfg.get('enable', False)
 
-        if node_enable is True:
-            is_enabled = True
-        elif node_enable is False:
-            is_enabled = global_enable   # 🔥 fallback ไป global
-        else:
-            is_enabled = global_enable   
-            
-        if not is_enabled: return
+        # ตรวจสอบสิทธิ์การใช้งาน (Node Priority > Global)
+        is_enabled = node_enable or global_enable
+        if not is_enabled:
+            return
 
-        print(f"🧹 [{self.node.name}] Checking for expired torrents...")
+        # เช็คสภาวะดิสก์เต็ม (Emergency) ถ้าพื้นที่เหลือน้อยกว่า 10GB หรือถูกสั่ง Force
+        # โดยอ้างอิงจากค่า free_gb ของ Node นั้นๆ
+        is_emergency = force_emergency or (self.node.free_gb < 10.0)
+        if is_emergency:
+            print(f"🚨 [EMERGENCY CLEAN] [{self.node.name}] พื้นที่วิกฤตเหลือ {self.node.free_gb:.2f}GB")
+
+        print(f"🔍 Debug: [{self.node.name}] Starting cleanup process... (Emergency: {is_emergency})")
+
         try:
             removed_list = []
-            if isinstance(self.node, QbitNode): removed_list = self._clean_qbit()
-            elif isinstance(self.node, RtorrentNode): removed_list = self._clean_rtorrent()
-            
+            if isinstance(self.node, QbitNode):
+                removed_list = self._clean_qbit(is_emergency)
+            elif isinstance(self.node, RtorrentNode):
+                removed_list = self._clean_rtorrent(is_emergency)
+
             if removed_list:
-                msg = f"🧹 [{self.node.name}] Cleanup Summary:\n" + "\n".join(removed_list)
+                status_title = "🚨 EMERGENCY Cleanup" if is_emergency else "🧹 Cleanup Summary"
+                msg = f"{status_title} [{self.node.name}]:\n" + "\n".join(removed_list)
                 send_notify(msg)
         except Exception as e:
             print(f"⚠️ [{self.node.name}] Clean Error: {e}")
 
-    def _clean_qbit(self):
+    def _should_remove(self, ratio, age_hours, is_emergency=False):
+        """
+        Logic การตัดสินใจลบไฟล์
+        """
+        # หากอยู่ในโหมดฉุกเฉิน จะลดเกณฑ์การลบลงครึ่งหนึ่ง (ลบง่ายขึ้น) เพื่อรีบคืนพื้นที่
+        threshold_div = 2 if is_emergency else 1
+
+        use_node_cfg = self.node_cfg.get('enable', False)
+        cfg = self.node_cfg if use_node_cfg else self.global_cfg
+
+        # ถ้าพื้นที่เป็น 0.0GB จริงๆ ให้ใช้เกณฑ์ "ล้างป่าช้า"
+        if self.node.free_gb <= 0.01:
+            # ลบไฟล์ที่อยู่เกิน 2 ชม. ทิ้งทันทีเพื่อกู้ชีพ Node
+            if age_hours >= 2: return True
+
+        # ดึงค่า Config (Ratio / Min Time / Max Time)
+        min_ratio = (cfg.get('min_ratio', 0.5)) / threshold_div
+        min_time = (cfg.get('min_time', 360) / 60) / threshold_div
+        max_time = (cfg.get('max_time', 1440) / 60) / threshold_div
+
+        # 1. ลบถ้าอยู่มานานเกิน Max Time
+        if age_hours >= max_time:
+            return True
+
+        # 2. ลบถ้าอยู่เกิน Min Time และ Ratio ถึงเป้าหมาย
+        if age_hours >= min_time and ratio >= min_ratio:
+            return True
+
+        return False
+
+    def _clean_qbit(self, is_emergency):
         res = []
+        # ดึงข้อมูลจาก qBittorrent Web API
         r = self.node.s.get(f"{self.node.url}/api/v2/torrents/info", auth=self.node.auth, verify=False, timeout=15)
         if r.status_code != 200: return []
+
         torrents = r.json()
         now = time.time()
         for t in torrents:
-            # 1. ข้ามถ้ายังโหลดไม่เสร็จ (progress น้อยกว่า 100%)
-            if t.get('progress', 0) < 1: 
-                continue
-        
-            # 2. ข้ามถ้าค่าเวลาโหลดเสร็จผิดปกติ
-            completion_on = t.get('completion_on', 0)
-            if completion_on <= 0:
-                continue
+            # ข้ามถ้ายังโหลดไม่เสร็จ
+            if t.get('progress', 0) < 1: continue
 
-            # 3. คำนวณเวลา Seeding จริง
+            completion_on = t.get('completion_on', 0)
+            if completion_on <= 0: continue
+
             age_hours = (now - completion_on) / 3600
             ratio = t.get('ratio', 0)
-            if self._should_remove(ratio, age_hours):
+
+            if self._should_remove(ratio, age_hours, is_emergency):
                 if self.node.delete_torrent(t['hash']):
-                    line = f"   🗑️ Removed: {t['name'][:30]} (Ratio: {ratio:.2f}, Seeding: {age_hours:.1f}h)"
+                    line = f"  🗑️ {t['name'][:30]} (R:{ratio:.2f}, {age_hours:.1f}h)"
                     print(line); res.append(line)
         return res
 
-    def _clean_rtorrent(self):
+    def _clean_rtorrent(self, is_emergency):
         res = []
-        # XML query สำหรับดึงข้อมูลที่จำเป็น
-        xml = '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>main</string></value></param><param><value><string>d.hash=</string></value></param><param><value><string>d.ratio=</string></value></param><param><value><string>d.timestamp.finished=</string></value></param><param><value><string>d.name=</string></value></param></params></methodCall>'
-        
+        # XML-RPC สำหรับ rTorrent multicall
+        xml = (
+            '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName>'
+            '<params><param><value><string></string></value></param>'
+            '<param><value><string>main</string></value></param>'
+            '<param><value><string>d.hash=</string></value></param>'
+            '<param><value><string>d.ratio=</string></value></param>'
+            '<param><value><string>d.timestamp.finished=</string></value></param>'
+            '<param><value><string>d.name=</string></value></param></params></methodCall>'
+        )
+
         try:
             r = requests.post(self.node.url, data=xml, auth=self.node.auth, verify=False, timeout=15)
-            if r.status_code != 200:
-                print(f"⚠️ [{self.node.name}] Connection Error: HTTP {r.status_code}")
-                return []
+            if r.status_code != 200: return []
 
             soup = BeautifulSoup(r.text, "xml")
-            # ความเสถียรสูง: เจาะจงไปที่ methodResponse ตามมาตรฐาน XML-RPC
             response = soup.find('methodResponse')
-            if not response:
-                return []
-                
+            if not response: return []
+
             torrent_entries = response.find_all('data')
             now = time.time()
 
             for entry in torrent_entries:
-                # ดึงค่าเฉพาะชั้นนอกสุดเพื่อป้องกันข้อมูลปนกัน
                 vals = [v.get_text().strip() for v in entry.find_all('value', recursive=False)]
-                
-                # ตรวจสอบความครบถ้วนของข้อมูล (Hash, Ratio, Finished, Name)
-                if len(vals) < 4:
-                    continue
-                
-                t_hash = vals[0]
-                # แปลง Ratio: rTorrent ส่งมาเป็น 1/1000 (เช่น 1500 คือ 1.5)
-                ratio = int(vals[1]) / 1000 if vals[1].isdigit() else 0
-                t_finish = int(vals[2]) if vals[2].isdigit() else 0
-                t_name = vals[3]
+                if len(vals) < 4: continue
 
-                # กรองเฉพาะไฟล์ที่โหลดเสร็จแล้วเท่านั้น
-                if t_finish <= 0:
-                    continue
+                t_hash, t_ratio_raw, t_finish, t_name = vals[0], vals[1], vals[2], vals[3]
 
-                age_hours = (now - t_finish) / 3600
+                if not t_finish.isdigit() or int(t_finish) <= 0: continue
 
-                # ตรวจสอบเงื่อนไขการลบตาม Config
-                if self._should_remove(ratio, age_hours):
+                ratio = int(t_ratio_raw) / 1000 if t_ratio_raw.isdigit() else 0
+                age_hours = (now - int(t_finish)) / 3600
+
+                if self._should_remove(ratio, age_hours, is_emergency):
                     if self.node.delete_torrent(t_hash):
-                        # ความสวยงาม: รายละเอียดชัดเจนแต่กระชับ
-                        line = f"  - 🗑️ {t_name[:35]}... (R:{ratio:.2f}, Seeding:{age_hours:.1f}h)"
-                        print(line)
-                        res.append(line)
+                        line = f"  🗑️ {t_name[:30]} (R:{ratio:.2f}, {age_hours:.1f}h)"
+                        print(line); res.append(line)
 
         except Exception as e:
-            # Error Handling: พิมพ์สาเหตุออกมาให้ทราบ
             print(f"⚠️ [{self.node.name}] rTorrent Clean Error: {str(e)}")
-            
         return res
-
-    def _should_remove(self, ratio, age_hours):
-        #ตรวจสอบว่า Node มีการตั้งค่าเฉพาะตัวและเปิดใช้งานอยู่หรือไม่
-        use_node_cfg = self.node_cfg.get('enable', False)
-        
-        if use_node_cfg:
-            # ถ้า Node เปิดอยู่: ใช้ค่าจาก Node (ถ้าไม่มีค่าใน Node ให้ใช้ Default)
-            min_ratio = self.node_cfg.get('min_ratio', 0.5)
-            min_time_m = self.node_cfg.get('min_time', 360)
-            max_time_m = self.node_cfg.get('max_time', 1440)
-        else:
-            # ถ้า Node ปิดอยู่: บังคับไปใช้ Global (ถ้าไม่มี Global ให้ใช้ Default)
-            min_ratio = self.global_cfg.get('min_ratio', 0.5)
-            min_time_m = self.global_cfg.get('min_time', 360)
-            max_time_m = self.global_cfg.get('max_time', 1440)        
-
-        # แปลงนาทีเป็นชั่วโมง
-        min_time = min_time_m / 60
-        max_time = max_time_m / 60
-        
-        # 1. อยู่มานานจนเกิน Max Time (ลบทันที)
-        if age_hours >= max_time: 
-            return True
-            
-        # 2. อยู่เกิน Min Time และ Ratio ถึงเป้า
-        if age_hours >= min_time and ratio >= min_ratio: 
-            return True
-        
-        return False
 
 # ========================= BEARBIT STATUS =========================
 
@@ -643,13 +643,26 @@ def main():
                 node = RtorrentNode(n_cfg) if n_cfg.get("type") == "rtorrent" else QbitNode(n_cfg)
 
                 if node.login():
-                    # 1.1 จัดการลบไฟล์เก่า (Cleanup)
-                    NodeCleaner(node, n_cfg.get('clean_settings', {}), global_clean).process()
-                    time.sleep(2)
-                    # 1.2 สั่ง Re-announce Tracker (เพื่อให้ข้อมูล Upload/Download เป็นปัจจุบันที่สุด)
-                    node.reannounce_all()
-                    # 1.3 อัปเดตสถานะ Node (พื้นที่ว่าง/จำนวนงาน)
+                    # 1. ต้อง refresh ก่อนเพื่อให้ NodeCleaner รู้ค่าพื้นที่ที่แท้จริง
                     node.refresh_status()
+                    pre_free = node.free_gb  # เก็บค่าพื้นที่ "ก่อนลบ"
+
+                    # 2. เริ่ม Cleanup (ส่งแรงกระตุ้นให้โหมด Emergency ทำงาน)
+                    # ตรวจสอบให้แน่ใจว่าได้อัปเดตคลาส NodeCleaner ให้รับค่า is_emergency แล้ว
+                    NodeCleaner(node, n_cfg.get('clean_settings', {}), global_clean).process()
+
+                    # 3. ให้เวลาระบบไฟล์คืนพื้นที่ และอัปเดต Tracker
+                    time.sleep(2)
+                    node.reannounce_all()
+
+                    # 4. refresh อีกครั้งเพื่อดูค่าพื้นที่ "หลังลบ"
+                    node.refresh_status()
+
+                    # 5. คำนวณและแสดงผลพื้นที่ที่กู้คืนมาได้
+                    gained = node.free_gb - pre_free
+                    if gained > 0.01:
+                        print(f"✨ [{node.name}] Cleaned up: {gained:.2f} GB recovered!")
+
                     active_nodes.append((node, n_cfg))
                     icon = "🟢"
                 else: icon = "❌"
@@ -764,14 +777,35 @@ def main():
                                 
                                     # เลือก Node ที่ว่างที่สุด
                                     active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
+
                                     if active_nodes:
-                                        node_obj, _ = active_nodes[0]
-                                        if node_obj.add(r_dl.content):
-                                            success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
-                                            print(success_msg)
-                                            added_in_zone.append(success_msg)
-                                            seen_ids.add(t_id)
-                                            if t_hash: seen_hashes.add(t_hash)
+                                        node_obj, n_cfg = active_nodes[0]
+
+                                        # 🛑 [NEW] ตรวจสอบพื้นที่: ต้องเหลือมากกว่าขนาดไฟล์ + ระยะปลอดภัย 5GB
+                                        # เพื่อป้องกันดิสก์เต็มระหว่างที่กำลังดาวน์โหลดจริงใน Node
+                                        if node_obj.free_gb < (t_size_gb + 5.0):
+                                            print(f"      🚨 [พื้นที่วิกฤต] [{node_obj.name}] เหลือ {node_obj.free_gb:.1f}GB (ต้องการ {t_size_gb + 5.0:.1f}GB)")
+
+                                            # 🧹 เรียก Emergency Clean ทันทีเพื่อพยายามคืนพื้นที่
+                                            cleaner = NodeCleaner(node_obj, n_cfg.get('clean_settings'), global_clean)
+                                            cleaner.process(force_emergency=True)
+
+                                            # อัปเดตสถานะพื้นที่อีกครั้งหลัง Clean
+                                            node_obj.refresh_status()
+
+                                            # ตรวจสอบซ้ำอีกครั้งหลัง Clean เสร็จ
+                                            if node_obj.free_gb < (t_size_gb + 5.0):
+                                                print(f"      ❌ ข้าม: [{node_obj.name}] พื้นไม่พอแม้จะ Clean แล้ว")
+                                                continue
+
+                                    # 2. เมื่อพื้นที่ผ่านเกณฑ์ จึงทำการเพิ่มไฟล์เข้า Node
+                                    if node_obj.add(r_dl.content):
+                                        success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
+                                        print(success_msg)
+                                        added_in_zone.append(success_msg)
+                                        seen_ids.add(t_id)
+                                        if t_hash:
+                                            seen_hashes.add(t_hash)
 
                                 # เช็คโควตาต่อโซน
                                 if len(added_in_zone) >= SET.get('MAX_NEW_PER_ZONE', 5): 
