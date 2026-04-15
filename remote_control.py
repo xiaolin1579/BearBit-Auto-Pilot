@@ -494,86 +494,67 @@ async def main():
             tasks.append(tg_bot.polling(non_stop=True))
         except Exception as e: print(f"❌ TG Error: {e}")
 
-    # --- 🟣 DISCORD SECTION (ปรับปรุงให้รองรับ @mention สมบูรณ์) ---
+    # --- 🟣 DISCORD SECTION (Private DM Mode) ---
     dc_cfg = CONF.get('DISCORD_CONFIG', {})
     if dc_cfg.get('remote_enable', False):
         try:
             intents = discord.Intents.default()
-            intents.message_content = True  # สำคัญมาก ต้องเปิดใน Portal ด้วย
+            intents.message_content = True  # ต้องเปิดใน Discord Developer Portal ด้วย
 
-            # ใช้ prefix เป็น ! และรองรับการแท็ก
-            dc_bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents, help_command=None)
+            # บอทจะไม่ตอบรับคำสั่งใน Server (Prefix setup)
+            dc_bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
             DC_ADMIN_ID = int(dc_cfg.get('admin_id', 0))
 
             @dc_bot.event
             async def on_ready():
-                print(f"✅ Discord Remote Online as: {dc_bot.user}")
+                print(f"✅ Discord Remote Online (DM Mode) as: {dc_bot.user}")
+                # ส่งข้อความทักทายเข้า DM เมื่อบอทออนไลน์
+                try:
+                    admin = await dc_bot.fetch_user(DC_ADMIN_ID)
+                    await admin.send("🔌 **BearBit Remote Online**\nบอทพร้อมรับคำสั่งผ่าน DM แล้วครับ")
+                except: pass
 
-            # --- เพิ่มส่วนนี้เพื่อดักจับการ @mention โดยเฉพาะ ---
             @dc_bot.event
             async def on_message(message):
-                if message.author == dc_bot.user: return # ไม่ตอบโต้บอทตัวเอง
+                # 1. กรองเฉพาะข้อความที่เป็น DM และส่งมาจาก Admin เท่านั้น
+                is_dm = isinstance(message.channel, discord.DMChannel)
+                is_admin = message.author.id == DC_ADMIN_ID
 
-                # ตรวจสอบว่าบอทถูกแท็กหรือไม่
-                if dc_bot.user.mentioned_in(message):
-                    content = message.content.lower()
-                    # ถ้าแท็กบอทแล้วมีคำว่า status หรือ log ให้ทำงานทันที
-                    if "status" in content:
-                        if message.author.id == DC_ADMIN_ID:
-                            await message.channel.send(get_status_text())
-                        else:
-                            await message.channel.send(f"⚠️ ID ของคุณคือ `{message.author.id}`")
-                        return # จบการทำงานตรงนี้เลย
+                if message.author == dc_bot.user: return
 
-                    elif "log" in content:
-                        if message.author.id == DC_ADMIN_ID:
-                            await message.channel.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
-                        return
-
-                # สำคัญ: ต้องมีบรรทัดนี้เพื่อให้คำสั่งแบบ !status ยังทำงานได้ปกติ
-                await dc_bot.process_commands(message)
+                if is_dm and is_admin:
+                    # ประมวลผลคำสั่งปกติ (!status, !log, !report)
+                    await dc_bot.process_commands(message)
+                elif not is_admin:
+                    # ถ้าคนอื่นทักมา ไม่ตอบโต้ใดๆ เพื่อความเป็นส่วนตัว
+                    return
 
             @dc_bot.command(name="status")
             async def dc_status(ctx):
-                if ctx.author.id == DC_ADMIN_ID:
-                    await ctx.send(format_report(get_status_text(), platform='dc'))
+                # ไม่ต้องเช็ค ID ซ้ำเพราะกรองที่ on_message แล้ว
+                await ctx.send(format_report(get_status_text(), platform='dc'))
 
             @dc_bot.command(name="report")
-            async def dc_status(ctx):
-                if ctx.author.id == DC_ADMIN_ID:
-                    await ctx.send(format_report(get_historical_report(), platform='dc'))
+            async def dc_report(ctx):
+                await ctx.send(format_report(get_historical_report(), platform='dc'))
 
             @dc_bot.command(name="log")
             async def dc_log(ctx):
-                if ctx.author.id == DC_ADMIN_ID:
-                    await ctx.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
+                await ctx.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
 
             @dc_bot.command(name="help")
             async def dc_help(ctx):
-                if ctx.author.id == DC_ADMIN_ID:
-                    embed = discord.Embed(
-                        title="🛠️ BearBit Discord Remote Help",
-                        description="รายการคำสั่งสำหรับการควบคุมและตรวจสอบระบบ",
-                        color=discord.Color.blue()
-                    )
-                    embed.add_field(
-                        name="📊 Monitoring", 
-                        value="`!status` - เช็คสถานะปัจจุบัน\n`!report` - ดูสถิติย้อนหลัง\n`!log` - ดู Log ล่าสุด", 
-                        inline=False
-                    )
-                    embed.add_field(
-                        name="🤖 Interaction", 
-                        value="แท็กบอท (@mention) แล้วตามด้วยคำว่า `status` หรือ `log` เพื่อสั่งงานแบบด่วนได้", 
-                        inline=False
-                    )
-                    embed.set_footer(text=f"Admin Only | ID: {DC_ADMIN_ID}")
-                    await ctx.send(embed=embed)
-
-            @dc_bot.event
-            async def on_command_error(ctx, error):
-                if isinstance(error, commands.CommandNotFound):
-                    if ctx.author.id == DC_ADMIN_ID:
-                        await ctx.send("❌ ไม่พบคำสั่งนี้! พิมพ์ `!help` เพื่อดูคำสั่งทั้งหมด")
+                embed = discord.Embed(
+                    title="🛠️ BearBit DM Remote Help",
+                    description="ควบคุมระบบ BearBit ผ่านแชทส่วนตัว",
+                    color=discord.Color.green()
+                )
+                embed.add_field(
+                    name="📜 Commands",
+                    value="`!status` - เช็คสถานะโหนด\n`!report` - ดูสถิติ 24 ชม.\n`!log` - ดู Log ล่าสุด",
+                    inline=False
+                )
+                await ctx.send(embed=embed)
 
             tasks.append(dc_bot.start(dc_cfg['remote_bot_token']))
         except Exception as e: print(f"❌ Discord Error: {e}")
