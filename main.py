@@ -58,20 +58,16 @@ def load_full_config():
 
 def send_notify(msg, raw_data=None):
     """
-    ส่งแจ้งเตือนผ่าน Messaging API (Flex Message), Telegram (HTML) และ Discord (Markdown)
-    :param msg: ข้อความต้นฉบับที่มีแท็ก <b> </b>
-    :param raw_data: (Optional) dict ข้อมูลดิบสำหรับสร้าง Flex Message ที่สวยงาม
+    ส่งแจ้งเตือนผ่าน Messaging API, Telegram และ Discord DM
     """
     cfg = load_full_config()
     msg = msg.strip()
-    
-    # เตรียมข้อความสำหรับแต่ละแพลตฟอร์ม
-    # Discord: เปลี่ยน <b> เป็น **
+
+    # เตรียมข้อความ
     discord_msg = msg.replace('<b>', '**').replace('</b>', '**')
-    # LINE Text: ลบแท็กออก (กรณีส่งแบบ Text ปกติ)
     line_clean_msg = msg.replace('<b>', '').replace('</b>', '')
 
-    # 1. LINE Messaging API (แทน LINE Notify)
+    # 1. LINE Messaging API (คงเดิม)
     line_cfg = cfg.get('LINE_CONFIG', {})
     if line_cfg.get('enable') and line_cfg.get('access_token'):
         url = "https://api.line.me/v2/bot/message/push"
@@ -79,18 +75,14 @@ def send_notify(msg, raw_data=None):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {line_cfg.get('access_token')}"
         }
-        
-        # ส่งแบบ Text (ถ้าต้องการความง่าย) หรือ Flex (ถ้าต้องการตัวหนา)
-        # ในที่นี้ส่งแบบ Text ให้ก่อนเพื่อให้โค้ดไม่ซับซ้อน แต่เปลี่ยนเป็นตัวหนาในอนาคตได้
         payload = {
             "to": line_cfg.get('user_id'),
             "messages": [{"type": "text", "text": line_clean_msg}]
         }
-        
         try: requests.post(url, json=payload, headers=headers, timeout=10)
         except: pass
 
-    # 2. Telegram Bot (HTML)
+    # 2. Telegram Bot (คงเดิม)
     tele_cfg = cfg.get('TELEGRAM_CONFIG', {})
     if tele_cfg.get('notify_enable') and tele_cfg.get('main_bot_token'):
         try:
@@ -101,15 +93,32 @@ def send_notify(msg, raw_data=None):
             )
         except: pass
 
-    # 3. Discord Webhook (Markdown)
+    # 3. Discord DM (ปรับปรุงใหม่)
     disc_cfg = cfg.get('DISCORD_CONFIG', {})
-    if disc_cfg.get('notify_enable') and disc_cfg.get('webhook_url'):
+    bot_token = disc_cfg.get('remote_bot_token') # ใช้ Token เดียวกับบอทรีโมท
+    admin_id = disc_cfg.get('admin_id')
+
+    if disc_cfg.get('notify_enable') and bot_token and admin_id:
         try:
-            admin_id = disc_cfg.get('admin_id', '').strip()
-            mention = f"<@{admin_id}> " if admin_id else ""
-            payload = {"content": f"{mention}**[BearBit Notification]**\n{discord_msg}"}
-            requests.post(disc_cfg.get('webhook_url'), json=payload, timeout=10)
-        except: pass
+            # ขั้นตอนที่ 1: สร้าง DM Channel กับ Admin
+            create_dm_url = "https://discord.com/api/v10/users/@me/channels"
+            headers = {
+                "Authorization": f"Bot {bot_token}",
+                "Content-Type": "application/json"
+            }
+            # ส่ง recipient_id (Admin ID) เพื่อขอเปิดห้องแชท
+            dm_channel_res = requests.post(create_dm_url, json={"recipient_id": str(admin_id)}, headers=headers, timeout=10)
+
+            if dm_channel_res.status_code == 200:
+                channel_id = dm_channel_res.json().get('id')
+                # ขั้นตอนที่ 2: ส่งข้อความเข้าไปใน Channel ID ที่ได้มา
+                send_msg_url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+                payload = {
+                    "content": f"🔔 **[BearBit Notification]**\n{discord_msg}"
+                }
+                requests.post(send_msg_url, json=payload, headers=headers, timeout=10)
+        except Exception as e:
+            print(f"⚠️ Discord DM Notify Error: {e}")
 
 def load_data(path):
     if not os.path.exists(path): return set()
@@ -389,7 +398,7 @@ class NodeCleaner:
             if age_hours >= 2: return True
 
         # ดึงค่า Config (Ratio / Min Time / Max Time)
-        min_ratio = (cfg.get('min_ratio', 0.5)) / threshold_div
+        min_ratio = (cfg.get('min_ratio', 1.0)) / threshold_div
         min_time = (cfg.get('min_time', 360) / 60) / threshold_div
         max_time = (cfg.get('max_time', 1440) / 60) / threshold_div
 

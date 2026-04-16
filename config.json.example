@@ -20,7 +20,7 @@
 	"NODES": 
 	[
 		{
-			"name": "VPS_Main_qBit",
+			"name": "Seedbox_Qbittorrent",
 			"type": "qbit",
 			"url": "http://1.2.3.4:8080",
 			"qb_user": "admin",
