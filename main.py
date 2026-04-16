@@ -497,26 +497,31 @@ class NodeCleaner:
 # ========================= BEARBIT STATUS =========================
 
 def save_hourly_snapshot(current_data):
-    """บันทึกสถิติแยกตามชั่วโมงเพื่อดูย้อนหลัง"""
     try:
-        try:
+        if os.path.exists(STATS_HISTORY_FILE):
             with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
                 history = json.load(f)
-        except: history = {}
+        else:
+            history = {}
 
-        # ใช้ชั่วโมง (00-23) เป็น Key
-        hour_key = datetime.now().strftime("%H")
-
-        # เก็บค่าดิบ (Raw Data) และ Timestamp
-        history[hour_key] = {
+        now = datetime.now()
+        # ใช้ Full Timestamp เป็น Key เพื่อป้องกันการทับกันของข้อมูลในแต่ละวัน
+        timestamp_key = now.strftime("%Y-%m-%d %H:%M") 
+        
+        history[timestamp_key] = {
             'data': current_data,
-            'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            'time': now.strftime("%Y-%m-%d %H:%M:%S")
         }
+
+        # รักษาขนาดไฟล์: เก็บข้อมูลไว้แค่ 31 วันล่าสุด
+        if len(history) > 744: # 24 ชม. * 31 วัน
+            sorted_keys = sorted(history.keys())
+            history = {k: history[k] for k in sorted_keys[-744:]}
 
         with open(STATS_HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=4)
     except Exception as e:
-        print(f"Log History Error: {e}")
+        print(f"❌ Log History Error: {e}")
 
 def get_stats_diff(current_data):
     """เปรียบเทียบค่าปัจจุบันกับค่าที่บันทึกไว้ (รองรับการแปลงหน่วย TB/GB/MB)"""
@@ -564,7 +569,7 @@ def get_stats_diff(current_data):
         json.dump(current_data, f)
     
     return diff_msg
-    
+   
 def get_bearbit_stats(page):
     try:
         content = page.content()
@@ -590,13 +595,24 @@ def get_bearbit_stats(page):
             
             diff_text = get_stats_diff(curr_data)
             
+            numeric_data = {
+                'username': curr_data['username'],
+                'ratio': float(curr_data['ratio'].replace(',', '')),
+                'up': parse_size(curr_data['up']),    # เก็บเป็นหน่วย GB จะแม่นยำที่สุด
+                'dl': parse_size(curr_data['dl']),
+                'bonus': float(curr_data['bonus'].replace(',', '')),
+                'raw_up': curr_data['up'], # เก็บตัวอักษรไว้ดูด้วยก็ได้ครับ
+                'raw_dl': curr_data['dl'] # เก็บตัวอักษรไว้ดูด้วยก็ได้ครับ
+            }
+            # ส่ง numeric_data ไปเซฟแทน
+            save_hourly_snapshot(numeric_data)
+            
             # จัดรูปแบบบรรทัดเดียว (Inline Style)
             stats_msg = (
                 f"👤 <b>{username}</b> | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
                 f"💰 Bonus: {curr_data['bonus']} "
                 f"{' |' + diff_text.replace('📊 <b>Changes:</b>', '🔄') if diff_text else ''}"
             )
-            save_hourly_snapshot(curr_data)
             return stats_msg
 
         return "⚠️ ไม่สามารถดึงสถิติได้"

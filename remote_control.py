@@ -160,96 +160,114 @@ def get_filtered_logs(n=15):
 def get_historical_report():
     try:
         if not os.path.exists(STATS_HISTORY_FILE):
-            return "⚠️ ยังไม่มีไฟล์ประวัติสถิติในขณะนี้"
+            return "⚠️ ยังไม่มีไฟล์ประวัติสถิติ"
 
         with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
             history = json.load(f)
 
+        if not history: return "⚠️ ข้อมูลว่างเปล่า"
+
         now = datetime.now()
-        curr_hour = now.strftime("%H")
+        today_str = now.strftime("%Y-%m-%d")
 
-        # 1. ข้อมูลปัจจุบัน
-        snapshot = history.get(curr_hour)
-        if not snapshot:
-            return "⚠️ ยังไม่มีข้อมูลประวัติสำหรับชั่วโมงนี้"
+        # กรองข้อมูลของวันนี้ (รองรับทั้งโครงสร้าง Flat และ Nested)
+        # ถ้าคุณใช้โครงสร้างล่าสุดที่ส่งมา (Flat) ให้ใช้บรรทัดนี้:
+        today_keys = sorted([k for k in history.keys() if k.startswith(today_str)])
 
-        curr = snapshot.get('data')
-        user_display = curr.get('username', 'BearBit User')
+        if not today_keys:
+            return f"📊 ยังไม่มีข้อมูลของวันนี้ ({today_str})"
 
-        def calc_diff(new_str, old_str):
-            if not new_str or not old_str: return "➖ 0.00 GB"
-            try:
-                n = parse_size(new_str)
-                o = parse_size(old_str)
-                diff = n - o
-                readable_val = format_size(diff)
-                
-                if diff > 0: 
-                    return f"📈 +{readable_val}"
-                elif diff < 0: 
-                    return f"📉 {readable_val}"
-                else: return "➖ 0.00 GB"
-            except: return "➖ 0.00 GB"
+        # ดึง Snapshot แรกและล่าสุด
+        first_snapshot = history[today_keys[0]]['data']
+        latest_snapshot = history[today_keys[-1]]['data']
 
-        # 2. ข้อมูลย้อนหลัง 1 ชม.
-        prev_hour = (now - timedelta(hours=1)).strftime("%H")
-        h1 = history.get(prev_hour, {}).get('data')
-        up_diff_h1 = calc_diff(curr['up'], h1['up']) if h1 else "N/A"
-        dl_diff_h1 = calc_diff(curr['dl'], h1['dl']) if h1 else "N/A"
+        # ข้อมูลย้อนหลัง 1 ชม.
+        target_h1 = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+        h1_key = next((k for k in reversed(today_keys) if k <= target_h1), None)
+        h1_snapshot = history.get(h1_key, {}).get('data') if h1_key else None
 
-        # 3. ⚡ ข้อมูลย้อนหลัง (Accumulated/24 Hours)
-        # หาเวลาที่เก่าที่สุดที่มีในไฟล์ history เพื่อใช้เป็นจุดตั้งต้น
-        all_snapshots = []
-        for h in history:
-            t_str = history[h].get('time', '')
-            if t_str:
-                t_obj = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
-                all_snapshots.append((t_obj, history[h].get('data')))
+        # ฟังก์ชันคำนวณส่วนต่างจากเลข Float (GB)
+        def calc_gain(new_val, old_val):
+            diff = new_val - old_val
+            if diff == 0: return "➖ 0.00 GB"
+            # ใช้ format_size ที่คุณมี หรือแปลงเองแบบนี้:
+            readable = format_size(diff)
+            return f"📈 +{readable}" if diff > 0 else f"📉 {readable}"
 
-        # เรียงลำดับตามเวลา (เก่าไปใหม่)
-        all_snapshots.sort(key=lambda x: x[0])
-
-        if all_snapshots:
-            oldest_time, oldest_data = all_snapshots[0]
-            time_diff = (now - oldest_time).total_seconds()
-
-            # ถ้าข้อมูลเก่าสุดนั้นมีอายุมากกว่า 10 นาที (ป้องกันลบกับตัวเองในนาทีแรก)
-            if time_diff > 600:
-                up_diff_24h = calc_diff(curr['up'], oldest_data['up'])
-                dl_diff_24h = calc_diff(curr['dl'], oldest_data['dl'])
-
-                # เปลี่ยนหัวข้อตามระยะเวลาที่มีข้อมูล
-                if time_diff < 82800: # ยังไม่ครบ 23 ชม.
-                    label_24h = f"⏳ <b>Accumulated ({int(time_diff//3600)}h {int((time_diff%3600)//60)}m)</b>"
-                else:
-                    label_24h = "📅 <b>Last 24 Hours</b>"
-            else:
-                up_diff_24h = dl_diff_24h = "Collecting..."
-                label_24h = "📅 <b>Last 24 Hours</b>"
-        else:
-            up_diff_24h = dl_diff_24h = "N/A"
-            label_24h = "📅 <b>Last 24 Hours</b>"
+        up_h1 = calc_gain(latest_snapshot['up'], h1_snapshot['up']) if h1_snapshot else "Collecting..."
+        up_today = calc_gain(latest_snapshot['up'], first_snapshot['up'])
+        dl_h1 = calc_gain(latest_snapshot['dl'], h1_snapshot['dl']) if h1_snapshot else "Collecting..."
+        dl_today = calc_gain(latest_snapshot['dl'], first_snapshot['dl'])
 
         msg = [
-            "📊 <b>BearBit 24H Performance</b>",
+            f"📊 <b>BearBit Report: {today_str}</b>",
             "━━━━━━━━━━━━━━━━━━",
-            f"👤 <b>User:</b> <code>{user_display}</code>",
-            f"📤 Uploaded: <code>{curr['up']}</code>",
-            f"📥 Downloaded: <code>{curr['dl']}</code>",
-            f"💰 Bonus: <code>{curr['bonus']}</code>",
+            f"👤 <b>User:</b> <code>{latest_snapshot['username']}</code>",
+            f"📤 <b>Uploaded:</b> <code>{latest_snapshot.get('raw_up', format_size(latest_snapshot['up']))}</code>",
+            f"📥 <b>Downloaded:</b> <code>{latest_snapshot.get('raw_dl', format_size(latest_snapshot['dl']))}</code>",
+            f"💰 <b>Bonus:</b> <code>{latest_snapshot['bonus']:,.1f}</code>",
             "━━━━━━━━━━━━━━━━━━",
             "⚡ <b>Last 1 Hour</b>",
-            f"  └ 📤 {up_diff_h1}",
-            f"  └ 📥 {dl_diff_h1}",
+            f"  └ 📤 {up_h1}",
+            f"  └ 📥 {dl_h1}",
             "━━━━━━━━━━━━━━━━━━",
-            f"{label_24h}", # ใช้ Label ที่คำนวณไว้
-            f"  └ 📤 {up_diff_24h}",
-            f"  └ 📥 {dl_diff_24h}",
+            f"📅 <b>Today's Gain</b> ({today_keys[0].split()[-1]} - {today_keys[-1].split()[-1]})",
+            f"  └ 📤 {up_today}",
+            f"  └ 📥 {dl_today}",
             "━━━━━━━━━━━━━━━━━━"
         ]
         return "\n".join(msg)
+
     except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+        return f"❌ Report Error: {str(e)}"
+
+def get_monthly_report():
+    try:
+        if not os.path.exists(STATS_HISTORY_FILE):
+            return "⚠️ ยังไม่มีไฟล์ประวัติสถิติ"
+
+        with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+
+        if not history: return "⚠️ ข้อมูลว่างเปล่า"
+
+        now = datetime.now()
+        current_month = now.strftime("%Y-%m") # "2026-04"
+
+        # กรองเอาเฉพาะ Key ที่เป็นของเดือนนี้ และเรียงลำดับ
+        monthly_keys = sorted([k for k in history.keys() if k.startswith(current_month)])
+
+        if len(monthly_keys) < 2:
+            return f"📊 ข้อมูลของเดือน {current_month} ยังไม่เพียงพอสำหรับสรุปยอด"
+
+        # ดึงข้อมูลตัวแรกของเดือน และตัวล่าสุดของเดือน
+        first_data = history[monthly_keys[0]]['data']
+        last_data = history[monthly_keys[-1]]['data']
+
+        # คำนวณส่วนต่าง (ใช้คีย์ 'up' และ 'bonus' ที่เป็นตัวเลขได้เลย)
+        up_gain = last_data['up'] - first_data['up']
+        dl_gain = last_data['dl'] - first_data['dl']
+        bonus_gain = last_data['bonus'] - first_data['bonus']
+
+        # นับจำนวนวันที่เริ่มมีข้อมูลในเดือนนี้
+        active_days = len(set([k.split()[0] for k in monthly_keys]))
+
+        msg = [
+            f"🗓️ <b>Monthly Summary: {current_month}</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"👤 <b>User:</b> <code>{last_data['username']}</code>",
+            f"📤 <b>Total Uploaded:</b> +{format_size(up_gain)}",
+            f"📥 <b>Total Downloaded:</b> +{format_size(dl_gain)}",
+            f"💰 <b>Total Bonus:</b> +{bonus_gain:,.1f} pts",
+            "━━━━━━━━━━━━━━━━━━",
+            f"📅 ข้อมูลสะสม: {active_days} วัน",
+            f"⏱️ ตั้งแต่: {monthly_keys[0]}",
+            f"⏱️ ถึง: {monthly_keys[-1]}"
+        ]
+        return "\n".join(msg)
+
+    except Exception as e:
+        return f"⚠️ Monthly Error: {str(e)}"
 
 def format_report(report_raw, platform='tg'):
     if platform == 'dc':
@@ -273,7 +291,7 @@ async def main():
 
             def main_menu():
                 m = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-                m.add('📊 Status Check', '📈 Stats Report', '⚙️ Config Settings', '📄 View Log', '📁 Download Log', '🎮 Bot Controls')
+                m.add('📊 Status Check', '📈 Stats Report', '📈 Stats Monthly Report', '⚙️ Config Settings', '📄 View Log', '📁 Download Log', '🎮 Bot Controls')
                 return m
 
             def settings_menu():
@@ -337,6 +355,8 @@ async def main():
                     await tg_bot.send_message(chat_id, get_status_text(), parse_mode='HTML')
                 elif txt == '📈 Stats Report':
                     await tg_bot.send_message(chat_id, get_historical_report(), parse_mode='HTML')
+                elif txt == '📈 Stats Monthly Report':
+                    await tg_bot.send_message(chat_id, get_monthly_report(), parse_mode='HTML')
                 elif txt == '⚙️ Config Settings':
                     c = load_config().get('SETTING', {})
                     status_free = "✅ ON" if c.get('FREELOAD_ENABLE', True) else "❌ OFF"
@@ -538,6 +558,10 @@ async def main():
             async def dc_report(ctx):
                 await ctx.send(format_report(get_historical_report(), platform='dc'))
 
+            @dc_bot.command(name="month")
+            async def dc_report(ctx):
+                await ctx.send(format_report(get_monthly_report(), platform='dc'))
+
             @dc_bot.command(name="log")
             async def dc_log(ctx):
                 await ctx.send(f"📄 **Logs:**\n```\n{get_filtered_logs()}\n```")
@@ -551,7 +575,7 @@ async def main():
                 )
                 embed.add_field(
                     name="📜 Commands",
-                    value="`!status` - เช็คสถานะโหนด\n`!report` - ดูสถิติ 24 ชม.\n`!log` - ดู Log ล่าสุด",
+                    value="`!status` - เช็คสถานะโหนด\n`!report` - ดูสถิติ 24 ชม.\n`!month` - ดูสถิติรายเดือน.\n`!log` - ดู Log ล่าสุด",
                     inline=False
                 )
                 await ctx.send(embed=embed)
