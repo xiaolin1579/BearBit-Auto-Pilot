@@ -12,7 +12,7 @@ import sys
 import platform
 import shutil
 from datetime import datetime
-from requests.auth import HTTPBasicAuth
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import functools
@@ -244,16 +244,30 @@ class RtorrentNode:
         self.user, self.pw = cfg["rt_user"], cfg["rt_pass"]
         self.quota_gb = cfg.get("quota_gb", 0)
         self.auth = HTTPBasicAuth(self.user, self.pw)
-        self.free_gb, self.is_connected = 0, False
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
+            'Content-Type': 'text/xml'
+        }
+        self.free_gb = 0
         self.jobs = 0
+        self.is_connected = False
         self.stat_msg = "Active/Total: 0/0"
 
     def login(self):
         try:
-            r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, timeout=10, verify=False)
+            # 1. ลอง Login ด้วย Basic Auth ก่อน
+            r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, timeout=10)
+            
+            # 2. ถ้าเจอ 401 และเซิร์ฟเวอร์แจ้งว่าต้องการ Digest
+            if r.status_code == 401 and 'digest' in r.headers.get('WWW-Authenticate', '').lower():
+                # สลับไปใช้ Digest Auth ทันที
+                self.auth = HTTPDigestAuth(self.user, self.pw)
+                r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, timeout=10)
+            
             self.is_connected = (r.status_code == 200)
             return self.is_connected
-        except: return False
+        except:
+            return False
 
     def refresh_status(self):
         if not self.is_connected: return False
@@ -752,7 +766,6 @@ def main():
                             
                             # --- วนลูปรายไฟล์ในโซน ---
                             for row in rows:
-                                if not row or not ("download" in str(row).lower() or "free" in str(row).lower()): continue
                                 link_tag = row.find("a", href=re.compile(r"details\.php\?id=\d+"))
                                 dl_link_tag = row.find("a", href=re.compile(r"download(new)?\.php\?id=\d+"))
                                 if not dl_link_tag or not link_tag: continue
@@ -762,6 +775,12 @@ def main():
                                 t_size_gb = parse_size(row.get_text(separator=" "))
 
                                 print(f"  🔍 Checking: {t_name[:50]}... (ID: {t_id})")
+
+                                # ตรวจสอบเงื่อนไข Download/Free และพิมพ์เหตุผลถ้าข้าม
+                                if not ("download" in str(row).lower() or "free" in str(row).lower()):
+                                    print(f"      ❌ ข้าม: ไม่พบสถานะ Free หรือปุ่ม Download")
+                                    count_skip += 1
+                                    continue
 
                                 # เช็คเงื่อนไขต่างๆ (Seen, Size, Free)
                                 if t_id in seen_ids:
