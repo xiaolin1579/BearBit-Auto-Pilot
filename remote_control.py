@@ -10,6 +10,7 @@ import subprocess
 import time
 import re
 import psutil
+import pytz
 from datetime import datetime, timedelta
 
 # --- SETUP PATH & CONFIG ---
@@ -30,6 +31,12 @@ def save_config(config):
     with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
+# กำหนด Timezone ไทย
+tz = pytz.timezone('Asia/Bangkok')
+
+def get_now():
+    """ฟังก์ชันกลางสำหรับดึงเวลาไทยปัจจุบัน"""
+    return datetime.now(tz)
 
 # --- SHARED FUNCTIONS ---
 def is_process_running(name):
@@ -231,7 +238,7 @@ def get_monthly_report():
 
         if not history: return "⚠️ ข้อมูลว่างเปล่า"
 
-        now = datetime.now()
+        now = get_now()
         current_month = now.strftime("%Y-%m") # "2026-04"
 
         # กรองเอาเฉพาะ Key ที่เป็นของเดือนนี้ และเรียงลำดับ

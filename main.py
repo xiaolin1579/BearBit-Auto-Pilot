@@ -11,6 +11,7 @@ import signal
 import sys
 import platform
 import shutil
+import pytz
 from datetime import datetime
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from bs4 import BeautifulSoup
@@ -120,6 +121,13 @@ def send_notify(msg, raw_data=None):
         except Exception as e:
             print(f"⚠️ Discord DM Notify Error: {e}")
 
+# กำหนด Timezone ไทย
+tz = pytz.timezone('Asia/Bangkok')
+
+def get_now():
+    """ฟังก์ชันกลางสำหรับดึงเวลาไทยปัจจุบัน"""
+    return datetime.now(tz)
+    
 def load_data(path):
     if not os.path.exists(path): return set()
     with open(path, "r", encoding='utf-8') as f: return set(x.strip().lower() for x in f if x.strip())
@@ -504,7 +512,7 @@ def save_hourly_snapshot(current_data):
         else:
             history = {}
 
-        now = datetime.now()
+        now = get_now()
         # ใช้ Full Timestamp เป็น Key เพื่อป้องกันการทับกันของข้อมูลในแต่ละวัน
         timestamp_key = now.strftime("%Y-%m-%d %H:%M") 
         
