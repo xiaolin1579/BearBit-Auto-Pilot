@@ -256,6 +256,16 @@ class QbitNode:
             return True
         except: return False
 
+    def get_active_download_count(self):
+        try:
+            # เช็คสถานะ downloading, initialMeta, checkingDL
+            r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': 'downloading'})
+            if r.status_code == 200:
+                return len(r.json())
+            return 0
+        except:
+            return 999 # ถ้า Error ให้ถือว่าเต็มไว้ก่อนเพื่อความปลอดภัย
+
     def reannounce_all(self):
         """ สั่ง Re-announce ทุก Torrent ใน qBittorrent """
         if not self.is_connected and not self.login(): return False
@@ -354,6 +364,41 @@ class RtorrentNode:
         except Exception as e:
             print(f"❌ rTorrent Reclaim Error: {e}")
             return []
+
+    def get_active_download_count(self):
+        try:
+            # ใช้ view 'downloading' ของ rTorrent โดยตรง ซึ่งจะรวมตัวที่กำลังโหลดอยู่ทั้งหมด
+            xml_payload = (
+                '<?xml version="1.0"?>'
+                '<methodCall>'
+                '<methodName>d.multicall2</methodName>'
+                '<params>'
+                '<param><value><string></string></value></param>'
+                '<param><value><string>downloading</string></value></param>'
+                '<param><value><string>d.hash=</string></value></param>'
+                '</params>'
+                '</methodCall>'
+            )
+
+            response = requests.post(
+                self.url,
+                data=xml_payload,
+                auth=self.auth,
+                timeout=10,
+                headers={'Content-Type': 'text/xml'}
+            )
+
+            if response.status_code == 200:
+                root = ET.fromstring(response.text)
+                # rTorrent จะส่งข้อมูลกลับมาใน tag <data> -> <value> หนึ่งอันต่องานหนึ่งตัว
+                # เราแค่นับจำนวน <value> ภายในก้อนข้อมูลที่ส่งกลับมา
+                items = root.findall(".//data/value")
+                return len(items)
+
+            return 999
+        except Exception as e:
+            print(f"⚠️ rTorrent Queue Check Error: {e}")
+            return 999
 
     def add(self, content, size=None, n_cfg=None):
         try:
@@ -921,7 +966,7 @@ def main():
                                     print(f"      ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข"); count_skip += 1; continue
                             
                                 free_p = 100 if any(x in str(row) for x in ["pic/s-free.gif", "pic/s-x2.gif", "x2", "x6", "Free"]) else check_freeload_status(row)
-                                if SET.get('FREELOAD_ENABLE') and free_p <= SET.get('MIN_FREE_PERCENT', 0):
+                                if SET.get('FREELOAD_ENABLE') and free_p < SET.get('MIN_FREE_PERCENT', 0):
                                     print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด"); count_skip += 1; continue
 
                                 # ดาวน์โหลดและเพิ่มเข้า Node
@@ -940,6 +985,14 @@ def main():
                                     if active_nodes:
                                         node_obj, n_cfg = active_nodes[0]
 
+                                        # 🛑 [NEW] ตรวจสอบคิว (Queue Limit)
+                                        # ดึงจำนวนงานที่กำลัง Downloading/Checking อยู่ปัจจุบัน
+                                        current_active = node_obj.get_active_download_count()
+                                        max_allowed = SET.get('MAX_ACTIVE_DOWNLOADS', 3) # Default ที่ 3 งาน
+
+                                        if current_active >= max_allowed:
+                                            print(f"⏳ [Queue Full] [{node_obj.name}] มีงานค้าง {current_active}/{max_allowed} งาน... ข้ามไปก่อน")
+                                            continue
                                         # 🛑 [Smart Reclaim Logic]
                                         # ตรวจสอบว่าพื้นที่ปัจจุบันพอสำหรับไฟล์ใหม่ + Buffer หรือไม่
                                         safety_margin = 5.0 # ระยะปลอดภัยขั้นต่ำ
