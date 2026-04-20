@@ -12,6 +12,7 @@ import sys
 import platform
 import shutil
 import pytz
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from bs4 import BeautifulSoup
@@ -227,9 +228,27 @@ class QbitNode:
 
     def add(self, content, size=None, n_cfg=None):
         try:
-            r = self.s.post(f"{self.url}/api/v2/torrents/add", files={"torrents": ("f.torrent", content)}, data={"paused": "false"}, auth=self.auth, verify=False, timeout=30)
+            r = self.s.post(f"{self.url}/api/v2/torrents/add", files={"torrents": ("f.torrent", content)}, data={"paused": "false","firstLastPiecePrio": "true"}, auth=self.auth, verify=False, timeout=30)
             return r.status_code == 200
         except: return False
+
+    def get_all_torrents_info(self):
+        try:
+            # ดึงเฉพาะตัวที่โหลดเสร็จแล้ว (Seeding/Completed)
+            r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': 'completed'}, timeout=10)
+            if r.status_code == 200:
+                # คืนค่า list ของ dict ที่มีข้อมูลจำเป็นในการตัดสินใจลบ
+                return [
+                    {
+                        'hash': t['hash'],
+                        'ratio': t['ratio'],
+                        'name': t['name'],
+                        'added_on': t['added_on'] # เผื่อใช้ลบตามความเก่า
+                    } for t in r.json()
+                ]
+            return []
+        except:
+            return []
 
     def delete_torrent(self, hash_str):
         try:
@@ -297,10 +316,58 @@ class RtorrentNode:
             return True
         except: return False
 
+    def get_all_torrents_info(self):
+        try:
+            xml = '''<?xml version="1.0"?>
+            <methodCall>
+            <methodName>d.multicall2</methodName>
+            <params>
+                <param><value><string></string></value></param>
+                <param><value><string>main</string></value></param>
+                <param><value><string>d.hash=</string></value></param>
+                <param><value><string>d.ratio=</string></value></param>
+                <param><value><string>d.complete=</string></value></param>
+                <param><value><string>d.name=</string></value></param>
+            </params>
+            </methodCall>'''
+
+            r = requests.post(self.url, data=xml, auth=self.auth, timeout=20, verify=False)
+            if r.status_code != 200: return []
+
+            root = ET.fromstring(r.text)
+            # rTorrent XML-RPC คืนค่าเป็น nested arrays
+            data = root.findall(".//value/array/data/value/array/data")
+
+            results = []
+            for item in data:
+                values = item.findall("./value")
+                # values[0]=hash, [1]=ratio, [2]=complete, [3]=name
+                is_complete = values[2].find("./i4").text == "1"
+
+                if is_complete:
+                    results.append({
+                        'hash': values[0].find("./string").text,
+                        'ratio': int(values[1].find("./i4").text) / 1000.0,
+                        'name': values[3].find("./string").text
+                    })
+            return results
+        except Exception as e:
+            print(f"❌ rTorrent Reclaim Error: {e}")
+            return []
+
     def add(self, content, size=None, n_cfg=None):
         try:
             b64 = base64.b64encode(content).decode('utf-8')
-            xml = f'<?xml version="1.0"?><methodCall><methodName>load.raw_start</methodName><params><param><value><string></string></value></param><param><value><base64>{b64}</base64></value></param></params></methodCall>'
+            command = 'd.priority_str=first_last'
+
+            xml = f'''<?xml version="1.0"?>
+            <methodCall>
+                <methodName>load.raw_start</methodName>
+                <params>
+                    <param><value><string>{command}</string></value></param>
+                    <param><value><base64>{b64}</base64></value></param>
+                </params>
+            </methodCall>'''
             return requests.post(self.url, data=xml, auth=self.auth, timeout=30, verify=False).status_code == 200
         except: return False
 
@@ -501,6 +568,46 @@ class NodeCleaner:
         except Exception as e:
             print(f"⚠️ [{self.node.name}] rTorrent Clean Error: {str(e)}")
         return res
+
+# ========================= Smart Reclaim Space =========================
+
+def smart_reclaim_process(client, required_gb):
+    """
+    เวอร์ชันปรับปรุง: ดึงข้อมูลครั้งเดียว, ลบจนกว่าจะพอ, และรองรับ Shared Disk Latency
+    """
+    try:
+        # 1. ดึงข้อมูลงานทั้งหมดที่โหลดเสร็จแล้ว
+        torrents = client.get_all_torrents_info()
+        if not torrents:
+            print("⚠️ ไม่มีงานที่โหลดเสร็จแล้วให้ลบ")
+            return False
+
+        # 2. จัดลำดับ: ลบตัวที่ Ratio สูงสุดก่อน (คุ้มค่าแล้ว)
+        # หรือเปลี่ยนเป็น x['added_on'] ถ้าอยากลบตัวที่เก่าที่สุด
+        torrents.sort(key=lambda x: x.get('ratio', 0), reverse=True)
+
+        target_free = required_gb + 10 # Buffer 10GB กันเหนียว
+
+        for t in torrents:
+            # เช็คพื้นที่ปัจจุบัน
+            current_free = get_free_space_gb()
+            if current_free >= target_free:
+                print(f"✅ พื้นที่เพียงพอแล้ว: {current_free} GB")
+                return True
+
+            print(f"🧹 กำลังลบ: {t['name']} (Ratio: {t['ratio']:.2f})")
+            client.delete_torrent(t['hash'], delete_files=True)
+
+            # 3. เผื่อเวลาให้ Shared Disk คืน Quota
+            # ถ้าไฟล์ใหญ่มากอาจต้องรอนานหน่อย
+            time.sleep(5)
+
+        # เช็คครั้งสุดท้ายหลังลบจนหมด List
+        return get_free_space_gb() >= target_free
+
+    except Exception as e:
+        print(f"❌ Reclaim Error: {str(e)}")
+        return False
 
 # ========================= BEARBIT STATUS =========================
 
@@ -814,7 +921,7 @@ def main():
                                     print(f"      ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข"); count_skip += 1; continue
                             
                                 free_p = 100 if any(x in str(row) for x in ["pic/s-free.gif", "pic/s-x2.gif", "x2", "x6", "Free"]) else check_freeload_status(row)
-                                if SET.get('FREELOAD_ENABLE') and free_p < SET.get('MIN_FREE_PERCENT', 0):
+                                if SET.get('FREELOAD_ENABLE') and free_p <= SET.get('MIN_FREE_PERCENT', 0):
                                     print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด"); count_skip += 1; continue
 
                                 # ดาวน์โหลดและเพิ่มเข้า Node
@@ -833,22 +940,25 @@ def main():
                                     if active_nodes:
                                         node_obj, n_cfg = active_nodes[0]
 
-                                        # 🛑 [NEW] ตรวจสอบพื้นที่: ต้องเหลือมากกว่าขนาดไฟล์ + ระยะปลอดภัย 5GB
-                                        # เพื่อป้องกันดิสก์เต็มระหว่างที่กำลังดาวน์โหลดจริงใน Node
-                                        if node_obj.free_gb < (t_size_gb + 5.0):
-                                            print(f"      🚨 [พื้นที่วิกฤต] [{node_obj.name}] เหลือ {node_obj.free_gb:.1f}GB (ต้องการ {t_size_gb + 5.0:.1f}GB)")
+                                        # 🛑 [Smart Reclaim Logic]
+                                        # ตรวจสอบว่าพื้นที่ปัจจุบันพอสำหรับไฟล์ใหม่ + Buffer หรือไม่
+                                        safety_margin = 5.0 # ระยะปลอดภัยขั้นต่ำ
+                                        if node_obj.free_gb < (t_size_gb + safety_margin):
+                                            print(f"🚨 [พื้นที่ไม่พอ] [{node_obj.name}] เหลือ {node_obj.free_gb:.1f}GB")
 
-                                            # 🧹 เรียก Emergency Clean ทันทีเพื่อพยายามคืนพื้นที่
-                                            cleaner = NodeCleaner(node_obj, n_cfg.get('clean_settings'), global_clean)
-                                            cleaner.process(force_emergency=True)
+                                            # เรียกใช้ Smart Reclaim เพื่อเคลียร์พื้นที่ตามลำดับ Ratio
+                                            success = smart_reclaim(
+                                                node_obj,
+                                                t_size_gb,
+                                                n_cfg.get('clean_settings'),
+                                                global_clean
+                                            )
 
-                                            # อัปเดตสถานะพื้นที่อีกครั้งหลัง Clean
-                                            node_obj.refresh_status()
-
-                                            # ตรวจสอบซ้ำอีกครั้งหลัง Clean เสร็จ
-                                            if node_obj.free_gb < (t_size_gb + 5.0):
-                                                print(f"      ❌ ข้าม: [{node_obj.name}] พื้นไม่พอแม้จะ Clean แล้ว")
+                                            if not success:
+                                                print(f"❌ [ข้าม] [{node_obj.name}] ไม่สามารถกู้คืนพื้นที่ได้เพียงพอ")
                                                 continue
+                                            else:
+                                                print(f"✨ [สำเร็จ] กู้คืนพื้นที่เรียบร้อย (ปัจจุบัน: {node_obj.free_gb:.1f}GB)")
 
                                     # 2. เมื่อพื้นที่ผ่านเกณฑ์ จึงทำการเพิ่มไฟล์เข้า Node
                                     if node_obj.add(r_dl.content):
