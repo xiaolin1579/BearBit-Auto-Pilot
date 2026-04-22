@@ -22,7 +22,8 @@
 		{
 			"name": "Seedbox_Qbittorrent",
 			"type": "qbit",
-			"url": "http://1.2.3.4:8080",
+            "disk_type": "HDD", //ขึ้นอยู่กับแพ็คเกจ seedbox (SSD,HDD,NVME,HYBRID[HDD+SSD/NVME])
+			"url": "http://1.2.3.4:8080", //ใช้ url ที่เข้าถึง qbit ได้
 			"qb_user": "admin",
 			"qb_pass": "adminadmin",
 			"quota_gb": 100,
@@ -39,7 +40,8 @@
 		{
 			"name": "Seedbox_rTorrent",
 			"type": "rtorrent",
-			"url": "https://your-seedbox.com/rpc",
+            "disk_type": "HDD", //ขึ้นอยู่กับแพ็คเกจ seedbox (SSD,HDD,NVME,HYBRID[HDD+SSD/NVME])
+			"url": "https://your-seedbox.com/rpc", //ใช้ url เต็มของ plugins httprpc [https://your-seedbox.com/rutorrent/plugins/httprpc/action.php]
 			"rt_user": "myuser",
 			"rt_pass": "mypassword",
 			"quota_gb": 0,
@@ -60,7 +62,7 @@
 		"main_bot_token": "123456789:ABCDefghIJKLmnop-MAIN",
 		"chat_id": "987654321",
 		"remote_enable": false,
-		"remote_bot_token": "987654321:XYZAbcdeFGHIjklm-REMOTE"
+		"remote_bot_token": "987654321:XYZAbcdeFGHIjklm-REMOTE" //บอทควบคุมหลัก แนะนำให้แยกกับบอทแจ้งเตือน
 	},
 	"LINE_CONFIG": 
 	{
@@ -69,8 +71,9 @@
 	},
 	"DISCORD_CONFIG": 
 	{
-		"enable": false,
-		"webhook_url": "https://discord.com/api/webhooks/...",
+        "notify_enable": true,
+        "remote_enable": true,
+        "remote_bot_token": "", //บอทตัวเดียวใช้ได้ทั้ง แจ้งเตือน และ รีโมท [ดูได้แค่สถานะการทำงานและรายงานสถิติ]
 		"admin_id": "123456789012345678"
 	},
 	"SETTING": 

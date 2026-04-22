@@ -256,15 +256,41 @@ class QbitNode:
             return True
         except: return False
 
-    def get_active_download_count(self):
+    def get_active_downloads(self):
+        """ดึงรายการ Torrent ที่กำลัง Downloading หรือ Checking"""
         try:
-            # เช็คสถานะ downloading, initialMeta, checkingDL
-            r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': 'downloading'})
-            if r.status_code == 200:
-                return len(r.json())
-            return 0
-        except:
-            return 999 # ถ้า Error ให้ถือว่าเต็มไว้ก่อนเพื่อความปลอดภัย
+            # ตรวจสอบสถานะการเชื่อมต่อก่อนดึงข้อมูล
+            if not self.is_connected:
+                self.login()
+
+            url = f"{self.url}/api/v2/torrents/info?filter=downloading"
+            r = self.s.get(url, auth=self.auth, timeout=10, verify=False)
+
+            # ถ้าเจอ 403 หรือ 401 ให้ลอง Login ใหม่ทันที
+            if r.status_code in [401, 403]:
+                self.login()
+                r = self.s.get(url, auth=self.auth, timeout=10, verify=False)
+
+            torrents = r.json()
+
+            # เพิ่มหมวด checking เข้าไปด้วย (ถ้ามี)
+            url_check = f"{self.url}/api/v2/torrents/info?filter=checking"
+            r_check = self.s.get(url_check, timeout=10)
+            torrents += r_check.json()
+
+            results = []
+            for t in torrents:
+                results.append({
+                    'hash': t.get('hash'),
+                    'size_bytes': t.get('size', 0),
+                    'state': t.get('state')
+                })
+            return results
+        except Exception as e:
+            # หาก Error ให้เซ็ตสถานะเป็น False เพื่อให้รอบหน้าบอทลอง Login ใหม่
+            self.is_connected = False
+            print(f"❌ [{self.name}] Error fetching active downloads: {e}")
+            return []
 
     def reannounce_all(self):
         """ สั่ง Re-announce ทุก Torrent ใน qBittorrent """
@@ -365,40 +391,35 @@ class RtorrentNode:
             print(f"❌ rTorrent Reclaim Error: {e}")
             return []
 
-    def get_active_download_count(self):
+    def get_active_downloads(self):
+        """ดึงรายการที่กำลังโหลด โดยเปลี่ยนไปใช้ view 'main' เพื่อเลี่ยง Error 503"""
         try:
-            # ใช้ view 'downloading' ของ rTorrent โดยตรง ซึ่งจะรวมตัวที่กำลังโหลดอยู่ทั้งหมด
-            xml_payload = (
-                '<?xml version="1.0"?>'
-                '<methodCall>'
-                '<methodName>d.multicall2</methodName>'
-                '<params>'
-                '<param><value><string></string></value></param>'
-                '<param><value><string>downloading</string></value></param>'
-                '<param><value><string>d.hash=</string></value></param>'
-                '</params>'
-                '</methodCall>'
-            )
+            import xmlrpc.client
+            # ผสม Auth ลงใน URL
+            auth_url = self.url.replace("://", f"://{self.user}:{self.pw}@")
+            proxy = xmlrpc.client.ServerProxy(auth_url)
 
-            response = requests.post(
-                self.url,
-                data=xml_payload,
-                auth=self.auth,
-                timeout=10,
-                headers={'Content-Type': 'text/xml'}
-            )
+            # ดึงจาก view "main" ซึ่งเป็นมาตรฐานของ rTorrent ทุกเวอร์ชั่น
+            token = ""
+            # เพิ่ม d.get_complete= เพื่อเช็คว่าตัวไหนยังโหลดไม่เสร็จ
+            params = ("main", "d.hash=", "d.size_bytes=", "d.complete=")
+            response = proxy.d.multicall2(token, *params)
 
-            if response.status_code == 200:
-                root = ET.fromstring(response.text)
-                # rTorrent จะส่งข้อมูลกลับมาใน tag <data> -> <value> หนึ่งอันต่องานหนึ่งตัว
-                # เราแค่นับจำนวน <value> ภายในก้อนข้อมูลที่ส่งกลับมา
-                items = root.findall(".//data/value")
-                return len(items)
-
-            return 999
+            results = []
+            for t in response:
+                # d.complete == 0 หมายถึงกำลังดาวน์โหลด (หรือยังโหลดไม่เสร็จ)
+                if int(t[2]) == 0:
+                    results.append({
+                        'hash': t[0],
+                        'size_bytes': int(t[1]),
+                        'state': 'downloading'
+                    })
+            return results
         except Exception as e:
-            print(f"⚠️ rTorrent Queue Check Error: {e}")
-            return 999
+            # หากเกิด Error ให้พยายาม Login ใหม่ในรอบหน้า
+            self.is_connected = False
+            print(f"❌ [{self.name}] rTorrent Error: {e}")
+            return []
 
     def add(self, content, size=None, n_cfg=None):
         try:
@@ -435,19 +456,21 @@ class RtorrentNode:
             return False
 
     def reannounce_all(self):
-        """ สั่ง Re-announce ทุก Torrent ใน rTorrent โดยวนลูปส่ง XML-RPC """
         if not self.is_connected and not self.login(): return False
         try:
-            # ดึงรายชื่อ hashes ทั้งหมดก่อน
-            xml_list = '<?xml version="1.0"?><methodCall><methodName>download_list</methodName></methodCall>'
-            r_list = requests.post(self.url, data=xml_list, auth=self.auth, timeout=10, verify=False)
-            soup = BeautifulSoup(r_list.text, "xml")
-            hashes = [s.get_text() for s in soup.find_all("string")]
-            
-            # วนลูปสั่ง announce ทีละตัว (rTorrent มาตรฐาน)
-            for h in hashes:
-                xml_ann = f'<?xml version="1.0"?><methodCall><methodName>d.tracker_announce</methodName><params><param><value><string>{h}</string></value></param></params></methodCall>'
-                requests.post(self.url, data=xml_ann, auth=self.auth, timeout=5, verify=False)
+            # ใช้ multicall2 สั่ง d.tracker_announce ทุกตัวในหน้าหลัก (main) พร้อมกัน
+            xml = (
+                '<?xml version="1.0"?>'
+                '<methodCall>'
+                '<methodName>d.multicall2</methodName>'
+                '<params>'
+                '<param><value><string></string></value></param>'
+                '<param><value><string>main</string></value></param>'
+                '<param><value><string>d.tracker_announce=</string></value></param>'
+                '</params>'
+                '</methodCall>'
+            )
+            requests.post(self.url, data=xml, auth=self.auth, timeout=15, verify=False)
             return True
         except: return False
 
@@ -779,7 +802,55 @@ def get_bearbit_stats(page):
 
     except Exception as e:
         return f"⚠️ Stats Error: {str(e)}"
-        
+
+# ========================= Smart Node Controller =========================
+
+def calculate_task_weight(size_gb):
+    """คำนวณน้ำหนักไฟล์: เล็ก=1, กลาง=2, ใหญ่=3"""
+    if size_gb < 8: return 1
+    elif size_gb < 20: return 2
+    return 3
+
+def get_node_dynamic_cap(node, disk_type):
+    """คำนวณ Capacity อัตโนมัติ พร้อมระบบ Reset Connection เมื่อ API ค้าง"""
+    # ปรับ Base Caps: HDD ให้รับงานเล็กๆ ได้มากขึ้นเพื่อปั๊มโหวต
+    base_caps = {'NVME': 15, 'SSD': 8, 'HYBRID': 6, 'HDD': 4}
+    base = base_caps.get(disk_type, 3)
+
+    start = time.time()
+    try:
+        # ลองดึง status เพื่อเช็คว่า API ยังมีชีวิตอยู่ไหม
+        node.refresh_status()
+        latency = (time.time() - start) * 1000
+
+        # ปรับตัวหารความหน่วงตามประเภทดิสก์ (HDD จะทนความหน่วงได้มากกว่า)
+        div = 100 if disk_type == 'HDD' else 50
+        proxy_wait = max(0, (latency - 200) / div)
+
+    except Exception as e:
+        # จุดตาย: ถ้า API พัง ให้ Reset สถานะทันทีเพื่อให้รอบหน้า Login ใหม่
+        node.is_connected = False
+        proxy_wait = 20
+        print(f"⚠️ [{node.name}] API Error: {e} | Connection Reset triggered.")
+
+    # ปรับค่าการลดทอน (Reduction)
+    reduction = 12 if disk_type == 'NVME' else 6
+
+    # คำนวณ Cap ใหม่: ถ้า proxy_wait สูง Cap จะลดลง แต่ไม่ต่ำกว่า 1
+    dynamic_cap = max(1, int(base / (1 + (proxy_wait / reduction))))
+
+    return dynamic_cap, proxy_wait
+
+def get_node_current_weight(node):
+    """คำนวณน้ำหนักงานปัจจุบันที่กำลัง 'เขียนดิสก์' (Downloading)"""
+    active_torrents = node.get_active_downloads() # ดึงรายการที่สถานะ Downloading/Checking
+    total_weight = 0
+    for t in active_torrents:
+        size_gb = t.get('size_bytes', 0) / (1024**3)
+        # น้ำหนักงาน: เล็ก=1 (<8GB), กลาง=2 (8-20GB), ใหญ่=3 (>20GB)
+        total_weight += 1 if size_gb < 8 else (2 if size_gb < 20 else 3)
+    return total_weight
+
 # ========================= AUTO VOTE =========================
 
 def auto_vote_snatched(page):
@@ -979,48 +1050,47 @@ def main():
                                     # กดขอบคุณ
                                     page.evaluate(f"sndReq('action=say_thanks&id={t_id}', 'saythanks')")
                                 
-                                    # เลือก Node ที่ว่างที่สุด
-                                    active_nodes.sort(key=lambda x: (x[0].free_gb - x[0].jobs), reverse=True)
+                                    # --- [ส่วนเลือก Node อัจฉริยะ] ---
+                                    # เรียงลำดับ Node ที่พื้นที่เยอะสุดก่อน
+                                    active_nodes.sort(key=lambda x: x[0].free_gb, reverse=True)
 
-                                    if active_nodes:
-                                        node_obj, n_cfg = active_nodes[0]
+                                    target_node = None
+                                    task_weight = calculate_task_weight(t_size_gb)
 
-                                        # 🛑 [NEW] ตรวจสอบคิว (Queue Limit)
-                                        # ดึงจำนวนงานที่กำลัง Downloading/Checking อยู่ปัจจุบัน
-                                        current_active = node_obj.get_active_download_count()
-                                        max_allowed = SET.get('MAX_ACTIVE_DOWNLOADS', 3) # Default ที่ 3 งาน
+                                    for node_obj, n_cfg in active_nodes:
+                                        d_type = n_cfg.get('disk_type', 'HDD')
 
-                                        if current_active >= max_allowed:
-                                            print(f"⏳ [Queue Full] [{node_obj.name}] มีงานค้าง {current_active}/{max_allowed} งาน... ข้ามไปก่อน")
+                                        # 1. เช็ค Capacity & Load อัตโนมัติ
+                                        dynamic_max_cap, p_wait = get_node_dynamic_cap(node_obj, d_type)
+                                        current_load = get_node_current_weight(node_obj) # ต้องเพิ่มเมธอดนี้ในคลาส Node
+
+                                        print(f"📡 Check [{node_obj.name}]: Load {current_load}/{dynamic_max_cap} (Wait: {p_wait:.1f})")
+
+                                        # 2. ตรวจสอบว่าคิวเต็มหรือไม่
+                                        if (current_load + task_weight) > dynamic_max_cap:
+                                            print(f"⏳ [Queue Full] {node_obj.name} รับงานเพิ่มไม่ไหว... ลอง Node ถัดไป")
                                             continue
-                                        # 🛑 [Smart Reclaim Logic]
-                                        # ตรวจสอบว่าพื้นที่ปัจจุบันพอสำหรับไฟล์ใหม่ + Buffer หรือไม่
-                                        safety_margin = 5.0 # ระยะปลอดภัยขั้นต่ำ
+
+                                        # 3. เช็คพื้นที่ (Smart Reclaim)
+                                        safety_margin = 5.0
                                         if node_obj.free_gb < (t_size_gb + safety_margin):
-                                            print(f"🚨 [พื้นที่ไม่พอ] [{node_obj.name}] เหลือ {node_obj.free_gb:.1f}GB")
+                                            success = smart_reclaim(node_obj, t_size_gb, n_cfg.get('clean_settings'), global_clean)
+                                            if not success: continue
 
-                                            # เรียกใช้ Smart Reclaim เพื่อเคลียร์พื้นที่ตามลำดับ Ratio
-                                            success = smart_reclaim(
-                                                node_obj,
-                                                t_size_gb,
-                                                n_cfg.get('clean_settings'),
-                                                global_clean
-                                            )
+                                        # ถ้าผ่านทุกด่าน ให้เลือกเครื่องนี้
+                                        target_node = node_obj
+                                        break
 
-                                            if not success:
-                                                print(f"❌ [ข้าม] [{node_obj.name}] ไม่สามารถกู้คืนพื้นที่ได้เพียงพอ")
-                                                continue
-                                            else:
-                                                print(f"✨ [สำเร็จ] กู้คืนพื้นที่เรียบร้อย (ปัจจุบัน: {node_obj.free_gb:.1f}GB)")
-
-                                    # 2. เมื่อพื้นที่ผ่านเกณฑ์ จึงทำการเพิ่มไฟล์เข้า Node
-                                    if node_obj.add(r_dl.content):
-                                        success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
-                                        print(success_msg)
-                                        added_in_zone.append(success_msg)
-                                        seen_ids.add(t_id)
-                                        if t_hash:
-                                            seen_hashes.add(t_hash)
+                                    # --- [เริ่มการดาวน์โหลดเข้า Node] ---
+                                    if target_node:
+                                        if target_node.add(r_dl.content):
+                                            success_msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
+                                            print(success_msg)
+                                            added_in_zone.append(success_msg)
+                                            seen_ids.add(t_id)
+                                            if t_hash: seen_hashes.add(t_hash)
+                                    else:
+                                        print(f"⚠️ [Skip] ไม่มี Node ไหนพร้อมรับงาน {t_name[:30]}")
 
                                 # เช็คโควตาต่อโซน
                                 if len(added_in_zone) >= SET.get('MAX_NEW_PER_ZONE', 5): 
