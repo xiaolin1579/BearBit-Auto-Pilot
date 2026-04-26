@@ -50,6 +50,8 @@ HASH_SEEN_FILE = os.path.join(BASE_DIR, "hash_seen.txt")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 STATS_CACHE_FILE = os.path.join(BASE_DIR, "stats_cache.json")
 STATS_HISTORY_FILE = os.path.join(BASE_DIR, "stats_history.json")
+CFG = {} 
+ORIGINAL_SETTING = None
 
 def load_full_config():
     if not os.path.exists(CONFIG_PATH):
@@ -153,11 +155,33 @@ def parse_size(size_str):
         return num * factors.get(unit, 1)
     except: return 0.0
 
-def check_freeload_status(soup_element):
-    free_tag = soup_element.find("font", color="green")
-    if not free_tag: return 0
-    try: return int(re.sub(r'\D', '', free_tag.get_text()))
-    except: return 0
+def check_freeload_status(row):
+    """
+    ฟังก์ชันวิเคราะห์ % การฟรีจาก HTML Row ของ BearBit
+    คืนค่าเป็น Integer (0-100) โดยที่ 100 คือฟรีทั้งหมด
+    """
+    cells = row.find_all("td")
+    # โดยปกติคอลัมน์ฟรีจะอยู่ลำดับที่ 7 หรือ 8 (index 6 หรือ 7)
+    # เราจะค้นหา TD ที่มีตัวเลข % หรือ Image สัญลักษณ์พิเศษ
+    for cell in cells[6:9]:
+        cell_text = cell.get_text(strip=True)
+        cell_str = str(cell)
+
+        # 1. เช็คสัญลักษณ์รูปภาพ (สัญลักษณ์พวกนี้คือฟรี 100% แน่นอน)
+        if any(x in cell_str for x in ["pic/s-free.gif", "pic/s-x2.gif", "pic/s-x6.gif"]):
+            return 100
+
+        # 2. เช็คตัวเลข % (เช่น 20%, 30%, 50%, 100%)
+        # ระบบ BearBit: ตัวเลขที่โชว์คือ 'ส่วนลด' เช่น 30% คือฟรี 30% จ่ายจริง 70%
+        match = re.search(r"(\d+)%", cell_text)
+        if match:
+            return int(match.group(1))
+
+        # 3. เช็คคำว่า 'No' (คือไม่ฟรีเลย 0%)
+        if "No" in cell_text:
+            return 0
+
+    return 0 # Default ถ้าไม่เจออะไรเลย
 
 # ========================= BROWSER ENGINE =========================
 
@@ -212,17 +236,27 @@ class QbitNode:
     def refresh_status(self):
         if not self.is_connected: return False
         try:
+            # ดึงข้อมูล Torrent ปัจจุบัน
             torrents = self.s.get(f"{self.url}/api/v2/torrents/info", auth=self.auth, verify=False, timeout=10).json()
-            total = len(torrents)
-            active_states = ['downloading', 'uploading', 'stalledUP', 'stalledDL', 'starting', 'checkingUP', 'checkingDL']
-            active = sum(1 for t in torrents if t.get('state') in active_states)
-            self.jobs = total
-            self.stat_msg = f"Active/Total: {active}/{total}"
+
+            # คำนวณพื้นที่ที่ใช้ไปจริงในเครื่อง
             used_gb = sum(t.get('size', 0) for t in torrents) / (1024**3)
-            if self.quota_gb > 0: self.free_gb = max(0, self.quota_gb - used_gb)
+
+            # --- จุดที่ต้องเพิ่ม ---
+            # หักลบพื้นที่สำรอง (Buffer) กันพลาดสัก 10-20 GB
+            # หรือลบด้วยขนาดไฟล์ที่บอท 'กำลังจะส่งเข้าเครื่อง' ในรอบนี้
+            safety_buffer = 15.0 # GB
+
+            if self.quota_gb > 0:
+                # คำนวณพื้นที่ว่างแบบเข้มงวด
+                self.free_gb = max(0, self.quota_gb - used_gb - safety_buffer)
             else:
                 r_main = self.s.get(f"{self.url}/api/v2/sync/maindata", auth=self.auth, verify=False, timeout=10).json()
                 self.free_gb = r_main.get('server_state', {}).get('free_space_on_disk', 0) / (1024**3)
+
+            # อัปเดตข้อความสถานะให้เราเห็น Buffer ด้วย
+            total = len(torrents)
+            self.stat_msg = f"Used: {used_gb:.1f}GB / Free(Safe): {self.free_gb:.1f}GB"
             return True
         except: return False
 
@@ -325,7 +359,7 @@ class RtorrentNode:
             if r.status_code == 401 and 'digest' in r.headers.get('WWW-Authenticate', '').lower():
                 # สลับไปใช้ Digest Auth ทันที
                 self.auth = HTTPDigestAuth(self.user, self.pw)
-                r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, timeout=10)
+                r = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>', auth=self.auth, headers=self.headers, timeout=10)
             
             self.is_connected = (r.status_code == 200)
             return self.is_connected
@@ -336,7 +370,7 @@ class RtorrentNode:
         if not self.is_connected: return False
         try:
             xml = '<?xml version="1.0"?><methodCall><methodName>d.multicall2</methodName><params><param><value><string></string></value></param><param><value><string>main</string></value></param><param><value><string>d.is_active=</string></value></param><param><value><string>d.size_bytes=</string></value></param></params></methodCall>'
-            soup = BeautifulSoup(requests.post(self.url, data=xml, auth=self.auth, timeout=10, verify=False).text, "xml")
+            soup = BeautifulSoup(requests.post(self.url, data=xml, auth=self.auth, headers=self.headers, timeout=10, verify=False).text, "xml")
             vals = [v.get_text() for v in soup.find_all("i8")]
             total, active, used_bytes = len(vals)//2, 0, 0
             self.jobs = total
@@ -345,10 +379,19 @@ class RtorrentNode:
                 used_bytes += int(vals[i+1])
             self.stat_msg = f"Active/Total: {active}/{total}"
             used_gb = used_bytes / (1024**3)
-            if self.quota_gb > 0: self.free_gb = max(0, self.quota_gb - used_gb)
+
+            if self.quota_gb > 0:
+                # 🛡️ เพิ่ม Buffer สำรองไว้ (แนะนำ 20-50 GB ตามขนาดไฟล์ใหญ่สุดที่ยอมให้โหลด)
+                # เพื่อป้องกันจังหวะที่บอท Add ไฟล์ซ้อนกันเร็วเกินไป
+                buffer_gb = 20.0
+                self.free_gb = max(0, self.quota_gb - used_gb - buffer_gb)
             else:
-                r_free = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>network.disk_free</methodName></methodCall>', auth=self.auth, timeout=10, verify=False)
+                # โหมดเช็คดิสก์จริง (มักจะใช้กับเครื่องที่ไม่มี Quota)
+                r_free = requests.post(self.url, data='<?xml version="1.0"?><methodCall><methodName>network.disk_free</methodName></methodCall>', auth=self.auth, headers=self.headers, timeout=10, verify=False)
                 self.free_gb = abs(int(BeautifulSoup(r_free.text, "xml").find("value").get_text().strip())) / (1024**3)
+
+            # อัปเดต stat_msg ให้เราดูง่ายขึ้นว่าพื้นที่ "ที่ใช้งานได้จริง" เหลือเท่าไหร่
+            self.stat_msg = f"Used: {used_gb:.1f}GB | Avail: {self.free_gb:.1f}GB"
             return True
         except: return False
 
@@ -367,7 +410,7 @@ class RtorrentNode:
             </params>
             </methodCall>'''
 
-            r = requests.post(self.url, data=xml, auth=self.auth, timeout=20, verify=False)
+            r = requests.post(self.url, data=xml, auth=self.auth, headers=self.headers, timeout=20, verify=False)
             if r.status_code != 200: return []
 
             root = ET.fromstring(r.text)
@@ -423,19 +466,42 @@ class RtorrentNode:
 
     def add(self, content, size=None, n_cfg=None):
         try:
-            b64 = base64.b64encode(content).decode('utf-8')
-            command = 'd.priority_str=first_last'
+            # 1. เช็คว่า content มีข้อมูลจริงไหม (ถ้าโดนบล็อกจะเป็นหน้าเว็บเปล่าๆ ขนาดจะเล็กมาก)
+            if len(content) < 1000:
+                print(f"❌ [{self.name}] Torrent file is too small or invalid.")
+                return False
 
+            b64 = base64.b64encode(content).decode('utf-8')
+
+            # ปรับ XML ให้เป็นมาตรฐานที่รองรับทั้ง rTorrent รุ่นเก่าและใหม่
             xml = f'''<?xml version="1.0"?>
             <methodCall>
                 <methodName>load.raw_start</methodName>
                 <params>
-                    <param><value><string>{command}</string></value></param>
-                    <param><value><base64>{b64}</base64></value></param>
+                    <param><value><string></string></value></param>
+                    <param><value><base64>{b64}</base64></value></param>     
                 </params>
             </methodCall>'''
-            return requests.post(self.url, data=xml, auth=self.auth, timeout=30, verify=False).status_code == 200
-        except: return False
+
+            # ต้องใส่ headers เข้าไปด้วย (สำคัญมากสำหรับบาง Host)
+            r = requests.post(
+                self.url,
+                data=xml,
+                auth=self.auth,
+                headers=self.headers, # ใช้ headers ที่เราตั้งไว้ใน __init__
+                timeout=30,
+                verify=False
+            )
+
+            if r.status_code == 200:
+                # ถ้า rTorrent รับสำเร็จ มันจะตอบกลับมาเป็น XML ที่มีค่า i4 หรือ i8 เป็น 0
+                return True
+            else:
+                print(f"❌ [{self.name}] Server returned status: {r.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ [{self.name}] Add Error: {e}")
+            return False
 
     def delete_torrent(self, t_hash):
         #สิ่งที่ต้องเพิ่มใน .rtorrent.rc
@@ -450,7 +516,7 @@ class RtorrentNode:
                 f'<params><param><value><string>{t_hash}</string></value></param></params>'
                 f'</methodCall>'
             )
-            response = requests.post(self.url, data=xml, auth=self.auth, verify=False, timeout=10)
+            response = requests.post(self.url, data=xml, auth=self.auth, headers=self.headers, verify=False, timeout=10)
             return response.status_code == 200
         except:
             return False
@@ -470,7 +536,7 @@ class RtorrentNode:
                 '</params>'
                 '</methodCall>'
             )
-            requests.post(self.url, data=xml, auth=self.auth, timeout=15, verify=False)
+            requests.post(self.url, data=xml, auth=self.auth, headers=self.headers, timeout=15, verify=False)
             return True
         except: return False
 
@@ -639,42 +705,42 @@ class NodeCleaner:
 
 # ========================= Smart Reclaim Space =========================
 
-def smart_reclaim_process(client, required_gb):
+def smart_reclaim_process(node, required_gb):
     """
-    เวอร์ชันปรับปรุง: ดึงข้อมูลครั้งเดียว, ลบจนกว่าจะพอ, และรองรับ Shared Disk Latency
+    เวอร์ชันแก้ไข: รองรับทั้ง QbitNode และ RtorrentNode โดยใช้ Method ภายในคลาส
     """
     try:
-        # 1. ดึงข้อมูลงานทั้งหมดที่โหลดเสร็จแล้ว
-        torrents = client.get_all_torrents_info()
+        # 1. ดึงข้อมูลงานที่โหลดเสร็จแล้วผ่าน Method ของ Node
+        torrents = node.get_all_torrents_info()
         if not torrents:
-            print("⚠️ ไม่มีงานที่โหลดเสร็จแล้วให้ลบ")
+            print(f"⚠️ [{node.name}] ไม่มีงานที่โหลดเสร็จแล้วให้ลบ")
             return False
 
-        # 2. จัดลำดับ: ลบตัวที่ Ratio สูงสุดก่อน (คุ้มค่าแล้ว)
-        # หรือเปลี่ยนเป็น x['added_on'] ถ้าอยากลบตัวที่เก่าที่สุด
+        # 2. จัดลำดับ: ลบตัวที่ Ratio สูงสุดก่อน
         torrents.sort(key=lambda x: x.get('ratio', 0), reverse=True)
 
-        target_free = required_gb + 10 # Buffer 10GB กันเหนียว
+        target_free = required_gb + 15.0 # Buffer 15GB สำหรับช่วง Santa 100%
 
         for t in torrents:
-            # เช็คพื้นที่ปัจจุบัน
-            current_free = get_free_space_gb()
-            if current_free >= target_free:
-                print(f"✅ พื้นที่เพียงพอแล้ว: {current_free} GB")
+            # อัปเดตพื้นที่ล่าสุดของ Node
+            node.refresh_status()
+            if node.free_gb >= target_free:
+                print(f"✅ [{node.name}] พื้นที่เพียงพอแล้ว: {node.free_gb:.2f} GB")
                 return True
 
-            print(f"🧹 กำลังลบ: {t['name']} (Ratio: {t['ratio']:.2f})")
-            client.delete_torrent(t['hash'], delete_files=True)
+            print(f"🧹 [{node.name}] กำลังลบ: {t['name'][:30]} (Ratio: {t['ratio']:.2f})")
 
-            # 3. เผื่อเวลาให้ Shared Disk คืน Quota
-            # ถ้าไฟล์ใหญ่มากอาจต้องรอนานหน่อย
+            # เรียกใช้ delete_torrent ของ Node (ซึ่งรองรับทั้ง qBit และ rTorrent)
+            node.delete_torrent(t['hash'])
+
+            # 3. เผื่อเวลาให้ Disk คืน Quota (สำคัญมากสำหรับ Seedbox)
             time.sleep(5)
 
-        # เช็คครั้งสุดท้ายหลังลบจนหมด List
-        return get_free_space_gb() >= target_free
+        node.refresh_status()
+        return node.free_gb >= target_free
 
     except Exception as e:
-        print(f"❌ Reclaim Error: {str(e)}")
+        print(f"❌ Reclaim Error on {node.name}: {str(e)}")
         return False
 
 # ========================= BEARBIT STATUS =========================
@@ -755,45 +821,68 @@ def get_stats_diff(current_data):
    
 def get_bearbit_stats(page):
     try:
+        global CFG
+        # --- 1. ค้นหา Link โปรไฟล์จากหน้าปัจจุบันก่อน (หน้าแรกหลัง Login) ---
         content = page.content()
         soup = BeautifulSoup(content, 'html.parser')
+        
+        # บรรทัดที่คุณถามถึง: หา Link ที่จะพาไปหน้า Profile
         user_tag = soup.find("a", href=re.compile(r"userdetails\.php\?id=\d+"))
-        username = user_tag.get_text(strip=True) if user_tag else "Unknown"
-        text = soup.get_text(separator=" ")
+        
+        if user_tag:
+            # ดึง URL และกระโดดไปหน้าโปรไฟล์ทันที
+            profile_url = "https://bearbit.org/" + user_tag['href']
+            page.goto(profile_url, wait_until="networkidle")
+            
+            # อัปเดต soup ให้เป็นเนื้อหาของหน้าโปรไฟล์ (ซึ่งมีข้อมูล Santa แน่นอน)
+            soup = BeautifulSoup(page.content(), 'html.parser')
+            username = user_tag.get_text(strip=True)
+        else:
+            username = "Unknown"
 
-        # ดึงค่าดิบ
+        # --- 2. เช็คไอเทม (ในหน้า User Details จะเจอคำนี้แน่นอน) ---
+        text_content = soup.get_text(separator=" ", strip=True)
+        active_item = "NONE"
+
+        if any(x in text_content for x in ["Free Download 100%", "ฟรีโหลด 100%"]):
+            active_item = "FREELOAD_100"
+        elif any(x in text_content for x in ["Free Download 50%", "ฟรีโหลด 50%", "ตุ๊กตาซานต้า"]):
+            active_item = "FREELOAD_50"
+        elif any(x in text_content for x in ["Free Download 15%", "ฟรีโหลด 15%", "หยินหยางนำโชค"]):
+            active_item = "FREELOAD_15"
+        elif any(x in text_content for x in ["Free Download 10%", "ฟรีโหลด 10%", "แหวนครองพิภพ"]):
+            active_item = "FREELOAD_10"
+
+        # สั่งอัปเดต CFG (ปลดล็อกขนาดไฟล์ 30-500GB ทันทีถ้าเจอ Santa)
+        update_bot_config(active_item) 
+
+        # --- 3. ดึงสถิติตัวเลขต่อ (ดึงจากหน้า Profile ได้เลย มีเหมือนหน้าแรก) ---
+        text = soup.get_text(separator=" ")
         ratio = re.search(r"Ratio:\s*([\d\.,]+)", text)
         up = re.search(r"Uploaded:\s*([\d\.,]+\s*[KMGTP]B)", text)
         dl = re.search(r"Downloaded:\s*([\d\.,]+\s*[KMGTP]B)", text)
         bonus = re.search(r"Bonus:\s*([\d\.,]+)", text)
 
         if ratio and up and dl:
-            curr_data = {
-                'username': username,
-                'ratio': ratio.group(1),
-                'up': up.group(1),
-                'dl': dl.group(1),
-                'bonus': bonus.group(1) if bonus else "0",
-            }
-            
+            # ... (Logic การเก็บข้อมูล Snapshots เหมือนเดิมของคุณ) ...
+            curr_data = {'username': username, 'ratio': ratio.group(1), 'up': up.group(1), 'dl': dl.group(1), 'bonus': bonus.group(1) if bonus else "0"}
             diff_text = get_stats_diff(curr_data)
             
+            # บันทึกข้อมูลเข้า DB/File
             numeric_data = {
-                'username': curr_data['username'],
+                'username': username,
                 'ratio': float(curr_data['ratio'].replace(',', '')),
-                'up': parse_size(curr_data['up']),    # เก็บเป็นหน่วย GB จะแม่นยำที่สุด
+                'up': parse_size(curr_data['up']),
                 'dl': parse_size(curr_data['dl']),
-                'bonus': float(curr_data['bonus'].replace(',', '')),
-                'raw_up': curr_data['up'], # เก็บตัวอักษรไว้ดูด้วยก็ได้ครับ
-                'raw_dl': curr_data['dl'] # เก็บตัวอักษรไว้ดูด้วยก็ได้ครับ
+                'bonus': float(curr_data['bonus'].replace(',', ''))
             }
-            # ส่ง numeric_data ไปเซฟแทน
             save_hourly_snapshot(numeric_data)
-            
-            # จัดรูปแบบบรรทัดเดียว (Inline Style)
+
+            # จัดรูปแบบข้อความส่ง Telegram
             stats_msg = (
                 f"👤 <b>{username}</b> | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
                 f"💰 Bonus: {curr_data['bonus']} "
+                f" | 🎁 Item: {active_item}"
                 f"{' |' + diff_text.replace('📊 <b>Changes:</b>', '🔄') if diff_text else ''}"
             )
             return stats_msg
@@ -802,6 +891,43 @@ def get_bearbit_stats(page):
 
     except Exception as e:
         return f"⚠️ Stats Error: {str(e)}"
+        
+
+def update_bot_config(active_item):
+    global CFG
+    if not CFG or 'SETTING' not in CFG: return
+
+    # กำหนดค่า Discount ตามไอเทมที่ตรวจเจอ
+    # เพิ่มรายการตรงนี้ได้เลย เช่น 10, 15, 30
+    discounts = {
+        "FREELOAD_100": 100,
+        "FREELOAD_50": 50,
+        "FREELOAD_15": 15,
+        "FREELOAD_10": 10
+    }
+
+    current_discount = discounts.get(active_item, 0)
+    CFG['SETTING']['CURRENT_DISCOUNT'] = current_discount
+
+    if current_discount == 100:
+        CFG['SETTING']['FREELOAD_ENABLE'] = False
+        print("🚀 FREE 100% MODE: กวาดทุกอย่าง (เน้นไฟล์ยักษ์)")
+
+    elif current_discount > 0:
+        CFG['SETTING']['FREELOAD_ENABLE'] = False
+        CFG['SETTING']['MIN_FREE_PERCENT'] = 0
+        CFG['SETTING']['EXCLUDE_WEB_FREE'] = True
+        print(f"⚠️ DISCOUNT {current_discount}% MODE: เลี่ยงไฟล์ที่หน้าเว็บฟรี >= {current_discount}%")
+
+    else:
+        try:
+            with open('config.json', 'r', encoding='utf-8') as f:
+                new_cfg = json.load(f)
+                CFG['SETTING'] = new_cfg.get('SETTING', {})
+                CFG['SETTING']['CURRENT_DISCOUNT'] = 0 # รีเซ็ตเป็น 0
+            print("🛡️ NORMAL MODE: กลับสู่คอนฟิกมาตรฐาน")
+        except Exception as e:
+            print(f"❌ Error reloading config: {e}")
 
 # ========================= Smart Node Controller =========================
 
@@ -814,9 +940,13 @@ def calculate_task_weight(size_gb):
 def get_node_dynamic_cap(node, disk_type):
     """คำนวณ Capacity อัตโนมัติ พร้อมระบบ Reset Connection เมื่อ API ค้าง"""
     # ปรับ Base Caps: HDD ให้รับงานเล็กๆ ได้มากขึ้นเพื่อปั๊มโหวต
-    base_caps = {'NVME': 15, 'SSD': 8, 'HYBRID': 6, 'HDD': 4}
+    base_caps = {
+        'NVME': 15,    # NVMe แรงมาก รับน้ำหนักได้เยอะ (ประมาณ 5 งานใหญ่)
+        'SSD': 10,     # SSD ทั่วไป
+        'HYBRID': 8,   # SSD/NVME Cache + HDD เพื่อให้รับงานใหญ่ได้ 6 งาน
+        'HDD': 4       # HDD ปกติขยับขึ้นมานิดนึง
+    }
     base = base_caps.get(disk_type, 3)
-
     start = time.time()
     try:
         # ลองดึง status เพื่อเช็คว่า API ยังมีชีวิตอยู่ไหม
@@ -834,7 +964,13 @@ def get_node_dynamic_cap(node, disk_type):
         print(f"⚠️ [{node.name}] API Error: {e} | Connection Reset triggered.")
 
     # ปรับค่าการลดทอน (Reduction)
-    reduction = 12 if disk_type == 'NVME' else 6
+    reductions = {
+        'NVME': 10,    # ให้โอกาส NVMe ทำงานหนักได้นานกว่า
+        'HYBRID': 8,   # Hybrid ให้ความเสถียรปานกลาง
+        'SSD': 6,
+        'HDD': 4       # HDD ต้องระวัง ถ้าเริ่มหน่วงให้รีบลด Cap ทันทีป้องกัน Disk ค้าง
+    }
+    reduction = reductions.get(disk_type, 6)
 
     # คำนวณ Cap ใหม่: ถ้า proxy_wait สูง Cap จะลดลง แต่ไม่ต่ำกว่า 1
     dynamic_cap = max(1, int(base / (1 + (proxy_wait / reduction))))
@@ -896,6 +1032,7 @@ def main():
     
     while True:
         try:
+            global CFG
             CFG = load_full_config()
             SET = CFG.get('SETTING', {})
             global_clean = CFG.get('GLOBAL_CLEAN', {})
@@ -1036,9 +1173,33 @@ def main():
                                 if not (SET.get('MIN_SIZE_GB', 0) <= t_size_gb <= SET.get('MAX_SIZE_GB', 999)):
                                     print(f"      ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข"); count_skip += 1; continue
                             
-                                free_p = 100 if any(x in str(row) for x in ["pic/s-free.gif", "pic/s-x2.gif", "x2", "x6", "Free"]) else check_freeload_status(row)
+                                free_p = check_freeload_status(row)
                                 if SET.get('FREELOAD_ENABLE') and free_p < SET.get('MIN_FREE_PERCENT', 0):
                                     print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด"); count_skip += 1; continue
+
+                                current_item_discount = SET.get('CURRENT_DISCOUNT', 0) # ตอนนี้คือ 50 จากตุ๊กตาซานต้า
+
+                                # 🛡️ ลอจิกคัดกรองความคุ้มค่า (Elf 50% Strategy)
+                                if SET.get('EXCLUDE_WEB_FREE') and current_item_discount > 0:
+
+                                    # กรณีที่ 1: หน้าเว็บฟรี 100% อยู่แล้ว (เช่นไฟล์สีทอง)
+                                    if free_p == 100:
+                                        print(f"     ⚠️ ข้าม: หน้าเว็บฟรี 100% อยู่แล้ว ไม่ต้องใช้สิทธิ์ไอเทม")
+                                        count_skip += 1
+                                        continue
+
+                                    # กรณีที่ 2: หน้าเว็บฟรี 'มากกว่าหรือเท่ากับ' ไอเทมที่เรามี
+                                    # เช่น เว็บฟรี 50% หรือ 75% อยู่แล้ว (จ่ายจริง 25%)
+                                    # การใช้ไอเทม 50% ของเราไปทับซ้อนจะ 'ไม่คุ้ม' เพราะเว็บจะยึดตัวที่ลดเยอะที่สุด
+                                    if free_p >= current_item_discount:
+                                        print(f"     ⚠️ ข้าม: หน้าเว็บฟรี {free_p}% ซึ่งดีกว่า/เท่ากับไอเทมเรา ({current_item_discount}%)")
+                                        count_skip += 1
+                                        continue
+
+                                    # ✅ กรณีที่ผ่าน (เช่น Jin-Rou ฟรี 25%):
+                                    # หน้าเว็บฟรีน้อยกว่าไอเทมเรา (25 < 50) บอทจะทำการโหลด
+                                    # เพื่อให้ไอเทม 50% ของเราไปช่วยลดค่า Download จริงลงไปอีก
+                                    print(f"     ✅ ลุย: หน้าเว็บฟรี {free_p}% ใช้ไอเทมเราลดเพิ่มเป็น {current_item_discount}% (คุ้ม!)")
 
                                 # ดาวน์โหลดและเพิ่มเข้า Node
                                 r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
@@ -1072,10 +1233,13 @@ def main():
                                             continue
 
                                         # 3. เช็คพื้นที่ (Smart Reclaim)
-                                        safety_margin = 5.0
+                                        safety_margin = 10.0
                                         if node_obj.free_gb < (t_size_gb + safety_margin):
-                                            success = smart_reclaim(node_obj, t_size_gb, n_cfg.get('clean_settings'), global_clean)
-                                            if not success: continue
+                                            # ส่ง node_obj เข้าไปทั้งก้อน ไม่ต้องเรียก .client แล้ว
+                                            success = smart_reclaim_process(node_obj, t_size_gb)
+                                            if not success:
+                                                print(f"⚠️ [{node_obj.name}] พื้นที่เต็มและเคลียร์ไม่ได้ ข้ามไฟล์นี้")
+                                                continue
 
                                         # ถ้าผ่านทุกด่าน ให้เลือกเครื่องนี้
                                         target_node = node_obj
@@ -1086,9 +1250,18 @@ def main():
                                         if target_node.add(r_dl.content):
                                             success_msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
                                             print(success_msg)
+
+                                            # 1. บันทึกประวัติ
                                             added_in_zone.append(success_msg)
                                             seen_ids.add(t_id)
                                             if t_hash: seen_hashes.add(t_hash)
+
+                                            # 2. จองพื้นที่แบบ Immediate (ตัดยอดในบัญชีทันที)
+                                            # ใช้ max(0, ...) กันค่าเพี้ยนจนติดลบ
+                                            target_node.free_gb = max(0.0, target_node.free_gb - t_size_gb)
+
+                                            # 3. (Option) อัปเดต stat_msg ให้เราเห็นยอดที่หักแล้วจริงๆ
+                                            target_node.stat_msg = f"Used: (Updating...) | Avail: {target_node.free_gb:.1f}GB"
                                     else:
                                         print(f"⚠️ [Skip] ไม่มี Node ไหนพร้อมรับงาน {t_name[:30]}")
 
