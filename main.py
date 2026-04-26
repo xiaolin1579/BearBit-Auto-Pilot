@@ -183,6 +183,23 @@ def check_freeload_status(row):
 
     return 0 # Default ถ้าไม่เจออะไรเลย
 
+def check_pending_status(session, base_url, t_id):
+    try:
+        detail_url = f"{base_url}/details.php?id={t_id}"
+        r = session.get(detail_url, timeout=10, verify=False)
+        if r.status_code == 200:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(r.text, 'html.parser')
+            # มองหาแถวที่มีคำว่า "ฟรีโหลด" หรือสถานะการดาวน์โหลด
+            # BearBit มักจะใช้ตารางในการแสดงผล
+            page_text = soup.get_text()
+            if "(รออนุมัติ)" in page_text:
+                return True
+        return False
+    except Exception as e:
+        print(f"      ⚠️ Error checking details: {e}")
+        return False
+
 # ========================= BROWSER ENGINE =========================
 
 def get_universal_browser():
@@ -897,11 +914,10 @@ def update_bot_config(active_item):
     global CFG
     if not CFG or 'SETTING' not in CFG: return
 
-    # กำหนดค่า Discount ตามไอเทมที่ตรวจเจอ
-    # เพิ่มรายการตรงนี้ได้เลย เช่น 10, 15, 30
     discounts = {
         "FREELOAD_100": 100,
         "FREELOAD_50": 50,
+        "FREELOAD_30": 30,
         "FREELOAD_15": 15,
         "FREELOAD_10": 10
     }
@@ -910,22 +926,28 @@ def update_bot_config(active_item):
     CFG['SETTING']['CURRENT_DISCOUNT'] = current_discount
 
     if current_discount == 100:
-        CFG['SETTING']['FREELOAD_ENABLE'] = False
-        print("🚀 FREE 100% MODE: กวาดทุกอย่าง (เน้นไฟล์ยักษ์)")
+        # โหมดฟรี 100%: ไม่ต้องสนหน้าเว็บ ไม่ต้องสน Pending เพราะเราฟรีแน่นอน
+        CFG['SETTING']['FREELOAD_ENABLE'] = True
+        CFG['SETTING']['MIN_FREE_PERCENT'] = 0
+        CFG['SETTING']['EXCLUDE_WEB_FREE'] = False # ไม่ต้องเลี่ยงไฟล์ฟรี เพราะยังไงเราก็ฟรี
+        print("🚀 [FREE 100% MODE]: กวาดทุกไฟล์ไม่สนหน้าเว็บ (เน้นเก็บยอดอัปโหลด)")
 
     elif current_discount > 0:
-        CFG['SETTING']['FREELOAD_ENABLE'] = False
+        # โหมดมีส่วนลด (เช่น 50%): ต้องใช้ลอจิกคัดกรองความคุ้มค่า
+        CFG['SETTING']['FREELOAD_ENABLE'] = True
         CFG['SETTING']['MIN_FREE_PERCENT'] = 0
         CFG['SETTING']['EXCLUDE_WEB_FREE'] = True
-        print(f"⚠️ DISCOUNT {current_discount}% MODE: เลี่ยงไฟล์ที่หน้าเว็บฟรี >= {current_discount}%")
+        print(f"⚠️ [DISCOUNT {current_discount}% MODE]: เน้นไฟล์ที่ใช้ไอเทมแล้วคุ้มกว่าหน้าเว็บ")
 
     else:
+        # โหมดปกติ: กลับไปใช้ค่ามาตรฐานจาก JSON
         try:
             with open('config.json', 'r', encoding='utf-8') as f:
                 new_cfg = json.load(f)
-                CFG['SETTING'] = new_cfg.get('SETTING', {})
-                CFG['SETTING']['CURRENT_DISCOUNT'] = 0 # รีเซ็ตเป็น 0
-            print("🛡️ NORMAL MODE: กลับสู่คอนฟิกมาตรฐาน")
+                # คืนค่ามาตรฐานที่เคยตั้งไว้ (เช่น MIN_FREE_PERCENT = 100)
+                CFG['SETTING'].update(new_cfg.get('SETTING', {}))
+                CFG['SETTING']['CURRENT_DISCOUNT'] = 0
+            print("🛡️ [NORMAL MODE]: กลับสู่คอนฟิกมาตรฐาน (เน้นโหลดเฉพาะไฟล์ฟรี 100%)")
         except Exception as e:
             print(f"❌ Error reloading config: {e}")
 
@@ -1167,41 +1189,43 @@ def main():
                                     continue
 
                                 # เช็คเงื่อนไขต่างๆ (Seen, Size, Free)
+                                # --- [1. เช็คพื้นฐานหน้าแรก] ---
                                 if t_id in seen_ids:
                                     print(f"      ❌ ข้าม: เคยเพิ่มไปแล้ว"); count_skip += 1; continue
-                            
+
                                 if not (SET.get('MIN_SIZE_GB', 0) <= t_size_gb <= SET.get('MAX_SIZE_GB', 999)):
                                     print(f"      ❌ ข้าม: ขนาด {t_size_gb:.2f}GB ไม่ตรงเงื่อนไข"); count_skip += 1; continue
-                            
+
                                 free_p = check_freeload_status(row)
+
+                                # --- [2. ลอจิกคัดกรองความคุ้มค่าไอเทม (ซานต้า 50%)] ---
+                                current_item_discount = SET.get('CURRENT_DISCOUNT', 0)
+
+                                # กรณีหน้าแรกฟรีโหลดต่ำกว่าเกณฑ์ที่ตั้งไว้
                                 if SET.get('FREELOAD_ENABLE') and free_p < SET.get('MIN_FREE_PERCENT', 0):
-                                    print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด"); count_skip += 1; continue
+                                    # ถ้าเราไม่มีไอเทมลดเลย (discount = 0) และหน้าแรกก็ไม่ฟรี บอทควรข้ามทันที ไม่ต้องเช็ค Details ให้เสียเวลา
+                                    if current_item_discount == 0:
+                                        print(f"      ❌ ข้าม: ฟรีโหลด {free_p}% ต่ำกว่ากำหนด และไม่มีไอเทมช่วยลด"); count_skip += 1; continue
 
-                                current_item_discount = SET.get('CURRENT_DISCOUNT', 0) # ตอนนี้คือ 50 จากตุ๊กตาซานต้า
-
-                                # 🛡️ ลอจิกคัดกรองความคุ้มค่า (Elf 50% Strategy)
+                                # เช็คความคุ้มค่าเทียบกับหน้าเว็บ
                                 if SET.get('EXCLUDE_WEB_FREE') and current_item_discount > 0:
-
-                                    # กรณีที่ 1: หน้าเว็บฟรี 100% อยู่แล้ว (เช่นไฟล์สีทอง)
                                     if free_p == 100:
-                                        print(f"     ⚠️ ข้าม: หน้าเว็บฟรี 100% อยู่แล้ว ไม่ต้องใช้สิทธิ์ไอเทม")
-                                        count_skip += 1
-                                        continue
-
-                                    # กรณีที่ 2: หน้าเว็บฟรี 'มากกว่าหรือเท่ากับ' ไอเทมที่เรามี
-                                    # เช่น เว็บฟรี 50% หรือ 75% อยู่แล้ว (จ่ายจริง 25%)
-                                    # การใช้ไอเทม 50% ของเราไปทับซ้อนจะ 'ไม่คุ้ม' เพราะเว็บจะยึดตัวที่ลดเยอะที่สุด
+                                        print(f"      ⚠️ ข้าม: หน้าเว็บฟรี 100% อยู่แล้ว"); count_skip += 1; continue
                                     if free_p >= current_item_discount:
-                                        print(f"     ⚠️ ข้าม: หน้าเว็บฟรี {free_p}% ซึ่งดีกว่า/เท่ากับไอเทมเรา ({current_item_discount}%)")
-                                        count_skip += 1
-                                        continue
+                                        print(f"      ⚠️ ข้าม: หน้าเว็บฟรี {free_p}% คุ้มกว่า/เท่ากับไอเทมเรา"); count_skip += 1; continue
 
-                                    # ✅ กรณีที่ผ่าน (เช่น Jin-Rou ฟรี 25%):
-                                    # หน้าเว็บฟรีน้อยกว่าไอเทมเรา (25 < 50) บอทจะทำการโหลด
-                                    # เพื่อให้ไอเทม 50% ของเราไปช่วยลดค่า Download จริงลงไปอีก
-                                    print(f"     ✅ ลุย: หน้าเว็บฟรี {free_p}% ใช้ไอเทมเราลดเพิ่มเป็น {current_item_discount}% (คุ้ม!)")
+                                # --- [3. ตรวจสอบ Pending (หน้าลึก)] ---
+                                # เช็คเฉพาะกรณีที่เว็บยังไม่ฟรี 100% เท่านั้น
+                                if free_p < 100:
+                                    time.sleep(random.uniform(0.8, 1.5))
+                                    print(f"      🔍 ตรวจสอบ Pending ที่หน้ารายละเอียด ID: {t_id}")
+                                    if check_pending_status(dl_session, "https://bearbit.org", t_id):
+                                        print(f"      ⏳ ข้าม: พบสถานะ [รออนุมัติฟรี]... รอโหลดฟรี 100% รอบหน้า")
+                                        count_skip += 1; continue
 
-                                # ดาวน์โหลดและเพิ่มเข้า Node
+                                # --- [4. ผ่านทุกด่าน: สั่งลุย] ---
+                                print(f"      ✅ ลุย: หน้าเว็บฟรี {free_p}% ใช้ไอเทมเราลดเพิ่มเป็น {current_item_discount}%")
+
                                 r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
                                 if r_dl.status_code == 200:
                                     t_hash = extract_info_hash(r_dl.content)
