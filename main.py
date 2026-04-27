@@ -157,31 +157,32 @@ def parse_size(size_str):
 
 def check_freeload_status(row):
     """
-    ฟังก์ชันวิเคราะห์ % การฟรีจาก HTML Row ของ BearBit
-    คืนค่าเป็น Integer (0-100) โดยที่ 100 คือฟรีทั้งหมด
+    เวอร์ชั่นแก้ไขตามโครงสร้าง HTML จริง:
+    ค่าฟรี (35%) อยู่ที่ Index 3
     """
     cells = row.find_all("td")
-    # โดยปกติคอลัมน์ฟรีจะอยู่ลำดับที่ 7 หรือ 8 (index 6 หรือ 7)
-    # เราจะค้นหา TD ที่มีตัวเลข % หรือ Image สัญลักษณ์พิเศษ
-    for cell in cells[6:9]:
-        cell_text = cell.get_text(strip=True)
-        cell_str = str(cell)
 
-        # 1. เช็คสัญลักษณ์รูปภาพ (สัญลักษณ์พวกนี้คือฟรี 100% แน่นอน)
-        if any(x in cell_str for x in ["pic/s-free.gif", "pic/s-x2.gif", "pic/s-x6.gif"]):
+    # สแกนตั้งแต่ Index 3 เป็นต้นไป (เพราะ index 0-2 คือหมวดหมู่/รูป/ชื่อไฟล์)
+    # เราจะสแกนไปจนถึงช่องที่ 8 เพื่อความปลอดภัย
+    for cell in cells[3:8]:
+        cell_html = str(cell).lower()
+        cell_text = cell.get_text(strip=True)
+
+        # 1. เช็คสัญลักษณ์รูปภาพที่เป็น Free 100%
+        if any(x in cell_html for x in ["pic/s-free.gif", "pic/s-x2.gif", "pic/s-x6.gif"]):
             return 100
 
-        # 2. เช็คตัวเลข % (เช่น 20%, 30%, 50%, 100%)
-        # ระบบ BearBit: ตัวเลขที่โชว์คือ 'ส่วนลด' เช่น 30% คือฟรี 30% จ่ายจริง 70%
-        match = re.search(r"(\d+)%", cell_text)
+        # 2. ค้นหาตัวเลข % (เช่น 35% ใน <font color=green><b>35%</b></font>)
+        match = re.search(r"(\d+)\s*%", cell_text)
         if match:
             return int(match.group(1))
 
-        # 3. เช็คคำว่า 'No' (คือไม่ฟรีเลย 0%)
-        if "No" in cell_text:
-            return 0
+        # 3. ถ้าเจอ "No" ในช่องนี้ และยังไม่เจอ % ให้สันนิษฐานว่า 0
+        # แต่ยังไม่ return ทันที เผื่อช่องถัดไปมี %
+        if "no" in cell_text.lower():
+            continue
 
-    return 0 # Default ถ้าไม่เจออะไรเลย
+    return 0
 
 def check_pending_status(session, base_url, t_id):
     try:
@@ -193,7 +194,7 @@ def check_pending_status(session, base_url, t_id):
             # มองหาแถวที่มีคำว่า "ฟรีโหลด" หรือสถานะการดาวน์โหลด
             # BearBit มักจะใช้ตารางในการแสดงผล
             page_text = soup.get_text()
-            if "(รออนุมัติ)" in page_text:
+            if "(รอการอนุมัติ)" in page_text:
                 return True
         return False
     except Exception as e:
@@ -1012,16 +1013,20 @@ def update_bot_config(active_item):
         print(f"⚠️ [DISCOUNT {current_discount}% MODE]: เน้นไฟล์ที่ใช้ไอเทมแล้วคุ้มกว่าหน้าเว็บ")
 
     else:
-        # โหมดปกติ: กลับไปใช้ค่ามาตรฐานจาก JSON
+        # โหมดปกติ: ไอเทมหมดอายุ
         try:
             with open('config.json', 'r', encoding='utf-8') as f:
                 new_cfg = json.load(f)
-                # คืนค่ามาตรฐานที่เคยตั้งไว้ (เช่น MIN_FREE_PERCENT = 100)
                 CFG['SETTING'].update(new_cfg.get('SETTING', {}))
-                CFG['SETTING']['CURRENT_DISCOUNT'] = 0
-            print("🛡️ [NORMAL MODE]: กลับสู่คอนฟิกมาตรฐาน (เน้นโหลดเฉพาะไฟล์ฟรี 100%)")
+
+            # --- เสริมกำแพงป้องกัน ---
+            CFG['SETTING']['CURRENT_DISCOUNT'] = 0
+
+            print("🛡️ [NORMAL MODE]: กลับสู่โหมดปกติ")
         except Exception as e:
-            print(f"❌ Error reloading config: {e}")
+            # กรณีโหลดไฟล์ไม่สำเร็จ ให้ใช้ค่า Hard-coded ที่ปลอดภัยที่สุด
+            CFG['SETTING']['CURRENT_DISCOUNT'] = 0
+            print(f"❌ Error reloading config: {e} | Switching to Emergency Safety Mode")
 
 # ========================= Smart Node Controller =========================
 
@@ -1064,10 +1069,23 @@ def get_node_dynamic_cap(node, disk_type):
         'SSD': 6,
         'HDD': 4       # HDD ต้องระวัง ถ้าเริ่มหน่วงให้รีบลด Cap ทันทีป้องกัน Disk ค้าง
     }
-    reduction = reductions.get(disk_type, 6)
+    # --- [เพิ่ม] ระบบตรวจสอบโควตาพื้นที่คงเหลือ (Free Space Weight) ---
+    free_gb = node.free_gb
 
-    # คำนวณ Cap ใหม่: ถ้า proxy_wait สูง Cap จะลดลง แต่ไม่ต่ำกว่า 1
-    dynamic_cap = max(1, int(base / (1 + (proxy_wait / reduction))))
+    # ถ้าพื้นที่เหลือน้อยกว่า 100GB ให้ลด Cap ลงอย่างรวดเร็ว
+    # ถ้าพื้นที่เหลือน้อยกว่า 20GB ให้ Cap เป็น 0 หรือ 1 ทันที
+    space_factor = 1.0
+    if free_gb < 20:
+        space_factor = 0.1  # แทบจะปิดรับงานใหม่
+    elif free_gb < 100:
+        space_factor = 0.5  # รับงานได้ครึ่งเดียวของปกติ
+
+    # คำนวณ Cap เดิมที่อิงจาก Latency
+    reduction = reductions.get(disk_type, 6)
+    latency_cap = int(base / (1 + (proxy_wait / reduction)))
+
+    # --- [Final Cap] รวมปัจจัยความหน่วง + พื้นที่คงเหลือ ---
+    dynamic_cap = max(1, int(latency_cap * space_factor))
 
     return dynamic_cap, proxy_wait
 
@@ -1270,7 +1288,7 @@ def main():
 
                                 free_p = check_freeload_status(row)
 
-                                # --- [2. ลอจิกคัดกรองความคุ้มค่าไอเทม (ซานต้า 50%)] ---
+                                # --- [2. ลอจิกคัดกรองความคุ้มค่าไอเทม] ---
                                 current_item_discount = SET.get('CURRENT_DISCOUNT', 0)
 
                                 # กรณีหน้าแรกฟรีโหลดต่ำกว่าเกณฑ์ที่ตั้งไว้
@@ -1296,7 +1314,24 @@ def main():
                                         count_skip += 1; continue
 
                                 # --- [4. ผ่านทุกด่าน: สั่งลุย] ---
-                                print(f"      ✅ ลุย: หน้าเว็บฟรี {free_p}% ใช้ไอเทมเราลดเพิ่มเป็น {current_item_discount}%")
+                                if current_item_discount > 0:
+                                    # [โหมดมีไอเทม] (เช่น ซานต้า 50%)
+                                    if free_p >= current_item_discount:
+                                        print(f"      ⚠️ ข้าม: หน้าเว็บ {free_p}% คุ้มกว่าไอเทม ({current_item_discount}%)")
+                                        count_skip += 1; continue
+                                    is_use_item = True
+                                else:
+                                    # [โหมดปกติ - ไม่มีไอเทม]
+                                    min_free = SET.get('MIN_FREE_PERCENT', 0)
+
+                                    if free_p < min_free:
+                                        print(f"      ❌ ข้าม: ฟรี {free_p}% ต่ำกว่าเกณฑ์ที่ตั้งไว้ ({min_free}%)")
+                                        count_skip += 1; continue
+
+                                    is_use_item = False
+
+                                # ตอนสั่งลุย จะได้ค่าที่ถูกต้อง
+                                print(f"      ✅ ลุย: หน้าเว็บฟรี {free_p}% (สิทธิ์: {'ไอเทม' if is_use_item else 'หน้าเว็บ'})")
 
                                 r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
                                 if r_dl.status_code == 200:
@@ -1307,64 +1342,58 @@ def main():
                                     # กดขอบคุณ
                                     page.evaluate(f"sndReq('action=say_thanks&id={t_id}', 'saythanks')")
                                 
-                                    # --- [ส่วนเลือก Node อัจฉริยะ] ---
-                                    # เรียงลำดับ Node ที่พื้นที่เยอะสุดก่อน
+                                    # --- [ส่วนเลือก Node และสั่งดาวน์โหลด] ---
                                     active_nodes.sort(key=lambda x: x[0].free_gb, reverse=True)
 
-                                    target_node = None
+                                    success_node = None # ใช้มาร์คว่าแอดไฟล์สำเร็จหรือยัง
                                     task_weight = calculate_task_weight(t_size_gb)
 
                                     for node_obj, n_cfg in active_nodes:
                                         d_type = n_cfg.get('disk_type', 'HDD')
-
-                                        # 1. เช็ค Capacity & Load อัตโนมัติ
                                         dynamic_max_cap, p_wait = get_node_dynamic_cap(node_obj, d_type)
-                                        current_load = get_node_current_weight(node_obj) # ต้องเพิ่มเมธอดนี้ในคลาส Node
+                                        current_load = get_node_current_weight(node_obj)
 
                                         print(f"📡 Check [{node_obj.name}]: Load {current_load}/{dynamic_max_cap} (Wait: {p_wait:.1f})")
 
-                                        # 2. ตรวจสอบว่าคิวเต็มหรือไม่
+                                        # 1. เช็ค Capacity
                                         if (current_load + task_weight) > dynamic_max_cap:
-                                            print(f"⏳ [Queue Full] {node_obj.name} รับงานเพิ่มไม่ไหว... ลอง Node ถัดไป")
+                                            print(f"⏳ [Queue Full] {node_obj.name} ลอง Node ถัดไป")
                                             continue
 
-                                        # 3. เช็คพื้นที่ (Smart Reclaim)
-                                        # สูตร: พื้นที่ที่ใช้ได้จริง = พื้นที่ว่างปัจจุบัน - พื้นที่ที่รอการโหลด (Downloading)
-                                        effective_free_gb = node_obj.free_gb - node_obj.get_downloading_size() # ต้องเพิ่มเมธอดนี้
+                                        # 2. เช็คพื้นที่สุทธิ
+                                        effective_free_gb = node_obj.free_gb - node_obj.get_downloading_size()
+                                        if effective_free_gb < (t_size_gb + 15.0):
+                                            print(f"🧹 พื้นที่น้อยไป... พยายาม Reclaim")
+                                            smart_reclaim_process(node_obj, t_size_gb)
+                                            node_obj.refresh_status() # อัปเดตหลังลบ
 
-                                        safety_margin = 15.0 # เพิ่ม margin เป็น 15GB กันเหนียวสำหรับ Disk Quota
-                                        if effective_free_gb < (t_size_gb + safety_margin):
-                                           # ถ้าพื้นที่ "สุทธิ" ไม่พอ ค่อยสั่ง Smart Reclaim
-                                           success = smart_reclaim_process(node_obj, t_size_gb)
+                                            if node_obj.free_gb < (t_size_gb + 2.0):
+                                                print(f"❌ พื้นที่ยังไม่พอ... ลอง Node ถัดไป")
+                                                continue
 
-                                        # ถ้าผ่านทุกด่าน ให้เลือกเครื่องนี้
-                                        target_node = node_obj
-                                        break
-
-                                    # --- [เริ่มการดาวน์โหลดเข้า Node] ---
-                                    if target_node:
-                                        # ก่อนแอดไฟล์ ให้เช็ค Last Minute อีกรอบ (Double Check)
-                                        if target_node.free_gb < t_size_gb:
-                                            print(f"❌ [Critical] {target_node.name} พื้นที่เพิ่งจะเต็มกระทันหัน! ยกเลิกการแอด");continue
-                                        if target_node.add(r_dl.content):
-                                            success_msg = f"📥 [Success] {target_node.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
+                                        # ✅ 3. ดำเนินการ Add ไฟล์ทันทีที่เจอ Node ที่เหมาะสม
+                                        if node_obj.add(r_dl.content):
+                                            success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
                                             print(success_msg)
 
-                                            # 1. บันทึกประวัติ
+                                            # จัดการจองพื้นที่และบันทึกประวัติ
+                                            booking_size = t_size_gb + 0.1
+                                            node_obj.free_gb = max(0.0, node_obj.free_gb - booking_size)
+                                            node_obj.stat_msg = f"Used: (Updating...) | Avail: {node_obj.free_gb:.1f}GB"
+
                                             added_in_zone.append(success_msg)
                                             seen_ids.add(t_id)
                                             if t_hash: seen_hashes.add(t_hash)
 
-                                            # 2. จองพื้นที่แบบ Immediate (ตัดยอดในบัญชีทันที)                                                          
-                                            # ปรับการจองพื้นที่ให้เผื่อ Buffer สำหรับไฟล์ Metadata / Resume Data
-                                            booking_size = t_size_gb + 0.1 # เผื่อไว้ 100MB ต่อไฟล์
-                                            target_node.free_gb = max(0.0, target_node.free_gb - booking_size)
-                                            # 3. (Option) อัปเดต stat_msg ให้เราเห็นยอดที่หักแล้วจริงๆ
-                                            target_node.stat_msg = f"Used: (Updating...) | Avail: {target_node.free_gb:.1f}GB"
-                                    else:
-                                        print(f"⚠️ [Skip] ไม่มี Node ไหนพร้อมรับงาน {t_name[:30]}")
+                                            success_node = node_obj
+                                            break # แอดสำเร็จแล้ว ออกจาก Loop เลือก Node เพื่อไปดูไฟล์ถัดไป
+                                        else:
+                                            print(f"⚠️ [Error] {node_obj.name} Add ไม่สำเร็จ... ลอง Node ถัดไป")
 
-                                # เช็คโควตาต่อโซน
+                                    # ถ้าวนจนครบทุก Node แล้วยังไม่มีที่ลง
+                                    if not success_node:
+                                        print(f"⚠️ [Skip] ไม่มี Node ไหนพร้อมรับงาน {t_name[:30]}")                                # เช็คโควตาต่อโซน
+
                                 if len(added_in_zone) >= SET.get('MAX_NEW_PER_ZONE', 5): 
                                     print(f"  ⚠️ ครบโควตา {len(added_in_zone)} ไฟล์แล้ว")
                                     break
