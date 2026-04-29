@@ -837,100 +837,126 @@ def smart_reclaim_process(node, required_gb):
 
 def save_hourly_snapshot(current_data):
     try:
+        # 1. โหลดข้อมูลเดิมด้วยวิธีที่ปลอดภัย
         if os.path.exists(STATS_HISTORY_FILE):
             with open(STATS_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
+                try:
+                    history = json.load(f)
+                except json.JSONDecodeError: # กันเหนียวถ้าไฟล์พังหรือว่างเปล่า
+                    history = {}
         else:
             history = {}
 
         now = get_now()
-        # ใช้ Full Timestamp เป็น Key เพื่อป้องกันการทับกันของข้อมูลในแต่ละวัน
-        timestamp_key = now.strftime("%Y-%m-%d %H:%M") 
-        
+        # ใช้ Key แบบรายชั่วโมง (เช่น "2026-04-29 10:00")
+        # เพื่อให้สถิติ 1 ชั่วโมงมีแค่ 1 Snapshopt ที่เป็นค่าล่าสุด
+        timestamp_key = now.strftime("%Y-%m-%d %H:00")
+
         history[timestamp_key] = {
-            'data': current_data,
-            'time': now.strftime("%Y-%m-%d %H:%M:%S")
+            'upload': current_data.get('upload', 0),
+            'download': current_data.get('download', 0),
+            'bonus': current_data.get('bonus', 0),
+            'raw_time': now.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        # รักษาขนาดไฟล์: เก็บข้อมูลไว้แค่ 31 วันล่าสุด
-        if len(history) > 744: # 24 ชม. * 31 วัน
-            sorted_keys = sorted(history.keys())
-            history = {k: history[k] for k in sorted_keys[-744:]}
+        # 2. เก็บย้อนหลัง 31 วัน (744 จุดข้อมูล)
+        if len(history) > 744:
+            # เก็บเฉพาะคีย์ที่ใหม่ที่สุด 744 อันดับ
+            sorted_keys = sorted(history.keys())[-744:]
+            history = {k: history[k] for k in sorted_keys}
 
-        with open(STATS_HISTORY_FILE, 'w', encoding='utf-8') as f:
+        # 3. บันทึกไฟล์แบบ Atomically (เขียนไฟล์ใหม่แล้วค่อยเปลี่ยนชื่อ เพื่อกันไฟล์พังตอนไฟดับ/เน็ตหลุด)
+        temp_file = STATS_HISTORY_FILE + ".tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=4)
+        os.replace(temp_file, STATS_HISTORY_FILE)
+
     except Exception as e:
         print(f"❌ Log History Error: {e}")
 
 def get_stats_diff(current_data):
-    """เปรียบเทียบค่าปัจจุบันกับค่าที่บันทึกไว้ (รองรับการแปลงหน่วย TB/GB/MB)"""
+    """เปรียบเทียบค่าปัจจุบันกับค่าที่บันทึกไว้"""
     diff_msg = ""
     if os.path.exists(STATS_CACHE_FILE):
-        with open(STATS_CACHE_FILE, 'r', encoding='utf-8') as f:
-            old_data = json.load(f)
-        
-        # 1. เทียบ Ratio และ Bonus (ใช้เลขตรงๆ)
-        def calc_num_diff(curr, old, precision=3):
-            c = float(str(curr).replace(',', ''))
-            o = float(str(old).replace(',', ''))
-            res = c - o
-            if res == 0: return "0"
-            return f"+{res:.{precision}f}" if res > 0 else f"{res:.{precision}f}"
+        try:
+            with open(STATS_CACHE_FILE, 'r', encoding='utf-8') as f:
+                old_data = json.load(f)
 
-        # 2. เทียบ Upload/Download (ต้องแปลงหน่วยก่อนลบ)
-        def calc_size_diff(curr_str, old_str):
-            curr_gb = parse_size(curr_str) # ใช้ฟังก์ชัน parse_size ที่คุณมีในโปรแกรม
-            old_gb = parse_size(old_str)
-            diff_gb = curr_gb - old_gb
-            
-            if diff_gb == 0: return "0"
-            if abs(diff_gb) >= 1024:
-                return f"+{diff_gb/1024:.2f} TB" if diff_gb > 0 else f"{diff_gb/1024:.2f} TB"
-            return f"+{diff_gb:.2f} GB" if diff_gb > 0 else f"{diff_gb:.2f} GB"
+            # --- ส่วนคำนวณเหมือนเดิมที่คุณเขียนไว้ ---
+            def calc_num_diff(curr, old, precision=3):
+                c = float(str(curr).replace(',', ''))
+                o = float(str(old).replace(',', ''))
+                res = c - o
+                return f"+{res:.{precision}f}" if res > 0 else (f"{res:.{precision}f}" if res < 0 else "0")
 
-        r_diff = calc_num_diff(current_data['ratio'], old_data['ratio'])
-        up_diff = calc_size_diff(current_data['up'], old_data['up'])
-        dl_diff = calc_size_diff(current_data['dl'], old_data['dl'])
-        b_diff = calc_num_diff(current_data['bonus'], old_data['bonus'], 1)
+            def calc_size_diff(curr_str, old_str):
+                curr_gb = parse_size(curr_str)
+                old_gb = parse_size(old_str)
+                diff_gb = curr_gb - old_gb
+                if diff_gb == 0: return "0"
+                if abs(diff_gb) >= 1024:
+                    val = diff_gb/1024
+                    return f"+{val:.2f} TB" if val > 0 else f"{val:.2f} TB"
+                return f"+{diff_gb:.2f} GB" if diff_gb > 0 else f"{diff_gb:.2f} GB"
 
-        # สร้างข้อความส่วนต่าง (แสดงเฉพาะที่มีการเปลี่ยนแปลง)
-        changes = []
-        if r_diff != "0": changes.append(f"Ratio: ({r_diff})")
-        if up_diff != "0": changes.append(f"Uploaded: ({up_diff})")
-        if dl_diff != "0": changes.append(f"Downloaded: ({dl_diff})")
-        if b_diff != "0": changes.append(f"Bonus: ({b_diff})")
-        
-        if changes:
-            diff_msg = "\n📊 <b>Changes:</b> " + " | ".join(changes)
+            up_diff = calc_size_diff(current_data['up'], old_data['up'])
+            dl_diff = calc_size_diff(current_data['dl'], old_data['dl'])
+            b_diff = calc_num_diff(current_data['bonus'], old_data['bonus'], 1)
 
-    # บันทึกค่าปัจจุบัน
+            # --- จุดที่ปรับแต่ง: ทำให้ Changes กระชับขึ้น ---
+            changes = []
+            if up_diff != "0": changes.append(f"Up: ({up_diff})")
+            if dl_diff != "0": changes.append(f"Dl: ({dl_diff})")
+            if b_diff != "0": changes.append(f"💰 {b_diff}") # โบนัสอาจจะเก็บไว้ดูง่ายๆ
+
+            if changes:
+                # ส่งคืนแค่ Changes: พร้อมข้อมูล (ไม่มี \n)
+                diff_msg = "<b>Changes:</b> " + " | ".join(changes)
+        except Exception as e:
+            print(f"Error reading cache: {e}")
+
+    # บันทึกค่าปัจจุบันทับเสมอ
     with open(STATS_CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(current_data, f)
-    
+
     return diff_msg
-   
+
+def check_item_urgency(exp_time_str):
+    try:
+        if exp_time_str == "N/A": return False
+        now = datetime.now()
+
+        # ถ้ารูปแบบเป็นวันที่ยาว (2026-04-29 20:30:15)
+        if "-" in exp_time_str:
+            exp_dt = datetime.strptime(exp_time_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            # ถ้ารูปแบบเป็นแค่เวลา (20:30:15)
+            exp_dt = datetime.strptime(exp_time_str, "%H:%M:%S").replace(
+                year=now.year, month=now.month, day=now.day
+            )
+
+        diff = (exp_dt - now).total_seconds() / 60
+        return 0 < diff <= 30
+    except:
+        return False
+
 def get_bearbit_stats(page):
     try:
         global CFG
-        # --- 1. ค้นหา Link โปรไฟล์จากหน้าปัจจุบันก่อน (หน้าแรกหลัง Login) ---
+        # --- 1. เข้าหน้าโปรไฟล์ ---
         content = page.content()
         soup = BeautifulSoup(content, 'html.parser')
-        
-        # บรรทัดที่คุณถามถึง: หา Link ที่จะพาไปหน้า Profile
         user_tag = soup.find("a", href=re.compile(r"userdetails\.php\?id=\d+"))
-        
+
         if user_tag:
-            # ดึง URL และกระโดดไปหน้าโปรไฟล์ทันที
             profile_url = "https://bearbit.org/" + user_tag['href']
             page.goto(profile_url, wait_until="networkidle")
-            
-            # อัปเดต soup ให้เป็นเนื้อหาของหน้าโปรไฟล์ (ซึ่งมีข้อมูล Santa แน่นอน)
             soup = BeautifulSoup(page.content(), 'html.parser')
             username = user_tag.get_text(strip=True)
         else:
             username = "Unknown"
 
-        # --- 2. เช็คไอเทม (ในหน้า User Details จะเจอคำนี้แน่นอน) ---
+        # --- 2. เช็คไอเทมและเวลาหมดอายุ ---
         text_content = soup.get_text(separator=" ", strip=True)
         active_item = "NONE"
 
@@ -943,10 +969,28 @@ def get_bearbit_stats(page):
         elif any(x in text_content for x in ["Free Download 10%", "ฟรีโหลด 10%", "แหวนครองพิภพ"]):
             active_item = "FREELOAD_10"
 
-        # สั่งอัปเดต CFG (ปลดล็อกขนาดไฟล์ 30-500GB ทันทีถ้าเจอ Santa)
-        update_bot_config(active_item) 
+        # ดึงเวลาแบบดิบ (Raw) เพื่อเอาไปใช้คำนวณ Urgency
+        exp_match = re.search(r"(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})", text_content)
+        raw_exp = exp_match.group(1) if exp_match else "N/A"
 
-        # --- 3. ดึงสถิติตัวเลขต่อ (ดึงจากหน้า Profile ได้เลย มีเหมือนหน้าแรก) ---
+        # จัดฟอร์แมตสำหรับแสดงผล (เช่น 20:30)
+        display_exp = raw_exp
+        if display_exp != "N/A" and " " in display_exp:
+            display_exp = display_exp.split(" ")[1][:5]
+        elif display_exp != "N/A":
+            display_exp = display_exp[:5]
+
+        # จัดการแสดงผล Item ตามเงื่อนไขที่คุณต้องการ (โชว์เวลาเฉพาะตอนมีไอเทม)
+        if active_item != "NONE":
+            item_display = f"<b>{active_item}</b> ({display_exp})"
+            urgency_alert = "⚠️ <b>ใกล้หมดเวลา!</b>\n" if check_item_urgency(raw_exp) else ""
+        else:
+            item_display = "NONE"
+            urgency_alert = ""
+
+        update_bot_config(active_item)
+
+        # --- 3. ดึงสถิติตัวเลข ---
         text = soup.get_text(separator=" ")
         ratio = re.search(r"Ratio:\s*([\d\.,]+)", text)
         up = re.search(r"Uploaded:\s*([\d\.,]+\s*[KMGTP]B)", text)
@@ -954,11 +998,16 @@ def get_bearbit_stats(page):
         bonus = re.search(r"Bonus:\s*([\d\.,]+)", text)
 
         if ratio and up and dl:
-            # ... (Logic การเก็บข้อมูล Snapshots เหมือนเดิมของคุณ) ...
-            curr_data = {'username': username, 'ratio': ratio.group(1), 'up': up.group(1), 'dl': dl.group(1), 'bonus': bonus.group(1) if bonus else "0"}
+            curr_data = {
+                'username': username,
+                'ratio': ratio.group(1),
+                'up': up.group(1),
+                'dl': dl.group(1),
+                'bonus': bonus.group(1) if bonus else "0"
+            }
             diff_text = get_stats_diff(curr_data)
-            
-            # บันทึกข้อมูลเข้า DB/File
+
+            # บันทึก Snapshot ลงไฟล์ JSON
             numeric_data = {
                 'username': username,
                 'ratio': float(curr_data['ratio'].replace(',', '')),
@@ -970,10 +1019,12 @@ def get_bearbit_stats(page):
 
             # จัดรูปแบบข้อความส่ง Telegram
             stats_msg = (
-                f"👤 <b>{username}</b> | Ratio: {ratio.group(1)} | Uploaded: {up.group(1)} | Downloaded: {dl.group(1)} | "
-                f"💰 Bonus: {curr_data['bonus']} "
-                f" | 🎁 Item: {active_item}"
-                f"{' |' + diff_text.replace('📊 <b>Changes:</b>', '🔄') if diff_text else ''}"
+                f"📊 <b>BearBit Status Report</b>\n"
+                f"👤 <b>{username}</b> | Ratio: {ratio.group(1)}\n"
+                f"📤 Up: {up.group(1)} | 📥 Dl: {dl.group(1)}\n"
+                f"💰 Bonus: {curr_data['bonus']} | 🎁 Item: {item_display}\n"
+                f"{urgency_alert + '\n' if urgency_alert else ''}"
+                f"{'🔄 ' + diff_text if diff_text else ''}" # ต่อกันเป็นบรรทัดเดียว
             )
             return stats_msg
 
@@ -981,7 +1032,6 @@ def get_bearbit_stats(page):
 
     except Exception as e:
         return f"⚠️ Stats Error: {str(e)}"
-        
 
 def update_bot_config(active_item):
     global CFG
@@ -1372,27 +1422,28 @@ def main():
                                                 continue
 
                                         # ✅ 3. ดำเนินการ Add ไฟล์ทันทีที่เจอ Node ที่เหมาะสม
-                                        if node_obj.add(r_dl.content):
-                                            success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
-                                            print(success_msg)
+                                        try:
+                                            if node_obj.add(r_dl.content):
+                                                success_msg = f"📥 [Success] {node_obj.name} | {t_size_gb:.1f}GB | {t_name[:40]}"
+                                                print(success_msg)
 
-                                            # จัดการจองพื้นที่และบันทึกประวัติ
-                                            booking_size = t_size_gb + 0.1
-                                            node_obj.free_gb = max(0.0, node_obj.free_gb - booking_size)
-                                            node_obj.stat_msg = f"Used: (Updating...) | Avail: {node_obj.free_gb:.1f}GB"
+                                                # จัดการจองพื้นที่และบันทึกประวัติ
+                                                booking_size = t_size_gb + 0.1
+                                                node_obj.free_gb = max(0.0, node_obj.free_gb - booking_size)
+                                                node_obj.stat_msg = f"Used: (Updating...) | Avail: {node_obj.free_gb:.1f}GB"
 
-                                            added_in_zone.append(success_msg)
-                                            seen_ids.add(t_id)
-                                            if t_hash: seen_hashes.add(t_hash)
+                                                added_in_zone.append(success_msg)
+                                                seen_ids.add(t_id)
+                                                if t_hash: seen_hashes.add(t_hash)
 
-                                            success_node = node_obj
-                                            break # แอดสำเร็จแล้ว ออกจาก Loop เลือก Node เพื่อไปดูไฟล์ถัดไป
-                                        else:
-                                            print(f"⚠️ [Error] {node_obj.name} Add ไม่สำเร็จ... ลอง Node ถัดไป")
-
-                                    # ถ้าวนจนครบทุก Node แล้วยังไม่มีที่ลง
-                                    if not success_node:
-                                        print(f"⚠️ [Skip] ไม่มี Node ไหนพร้อมรับงาน {t_name[:30]}")                                # เช็คโควตาต่อโซน
+                                                success_node = node_obj
+                                                break
+                                            else:
+                                                # กรณี API ตอบกลับมาเป็น False (เช่น ดิสก์ในโปรแกรมเต็ม หรือไฟล์ซ้ำ)
+                                                print(f"⚠️ [API Reject] {node_obj.name} ปฏิเสธงาน (Disk Full/Dup)")
+                                        except Exception as e:
+                                            # 🚨 จุดสำคัญ: จะโชว์ว่า Password ผิด, Timeout หรือ Server Down
+                                            print(f"❌ [Connect Error] {node_obj.name}: {str(e)}")
 
                                 if len(added_in_zone) >= SET.get('MAX_NEW_PER_ZONE', 5): 
                                     print(f"  ⚠️ ครบโควตา {len(added_in_zone)} ไฟล์แล้ว")
