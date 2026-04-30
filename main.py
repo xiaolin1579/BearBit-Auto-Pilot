@@ -1356,8 +1356,13 @@ def main():
                         
                             # ดึงรายการ Torrent
                             all_details = soup.find_all("a", href=re.compile(r"details(new)?\.php\?id=\d+"))
-                            rows = list(dict.fromkeys([a.find_parent("tr") for a in all_details if not a.find("img") and len(a.get_text(strip=True)) > 5]))
-                            
+                            rows = []
+                            for a in all_details:
+                                # เช็คว่าข้อความในลิงก์ยาวพอไหม (ชื่อไฟล์)
+                                if len(a.get_text(strip=True)) > 5:
+                                    parent_tr = a.find_parent("tr")
+                                    if parent_tr and parent_tr not in rows:
+                                        rows.append(parent_tr)
                             # --- วนลูปรายไฟล์ในโซน ---
                             for row in rows:
                                 link_tag = row.find("a", href=re.compile(r"details\.php\?id=\d+"))
