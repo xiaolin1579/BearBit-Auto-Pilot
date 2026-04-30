@@ -1179,6 +1179,38 @@ def get_node_current_weight(node):
         total_weight += 1 if size_gb < 8 else (2 if size_gb < 20 else 3)
     return total_weight
 
+def is_file_already_on_node(node, target_name, target_hash=None):
+    """
+    ตรวจสอบว่ามีไฟล์นี้อยู่บน Node แล้วหรือยัง
+    รองรับทั้งการเช็คจาก Hash (แม่นยำสูง) และ Name (ป้องกันชื่อซ้ำ)
+    """
+    try:
+        # ดึงรายชื่อ Torrent ทั้งหมดที่รันอยู่ในปัจจุบัน
+        # หมายเหตุ: node.get_all_torrents_info() ต้องคืนค่า list ของ dict ที่มี 'hash' และ 'name'
+        existing_torrents = node.get_all_torrents_info()
+
+        target_name_l = target_name.lower()
+        if target_hash:
+            target_hash_l = target_hash.lower()
+        else:
+            target_hash_l = None
+
+        for t in existing_torrents:
+            # 1. ตรวจสอบด้วย Hash (ถ้ามี)
+            current_hash = t.get('hash', '').lower()
+            if target_hash_l and current_hash == target_hash_l:
+                return True, "Hash Match"
+
+            # 2. ตรวจสอบด้วยชื่อไฟล์
+            current_name = t.get('name', '').lower()
+            if target_name_l in current_name or current_name in target_name_l:
+                return True, "Name Match"
+
+        return False, None
+    except Exception as e:
+        print(f"⚠️ [{node.name}] Check Duplicate Error: {e}")
+        return False, None
+
 # ========================= AUTO VOTE =========================
 
 def auto_vote_snatched(page):
@@ -1415,10 +1447,32 @@ def main():
 
                                 r_dl = dl_session.get(f"https://bearbit.org/{dl_link_tag['href'].lstrip('/')}")
                                 if r_dl.status_code == 200:
-                                    t_hash = extract_info_hash(r_dl.content)
-                                    if t_hash and t_hash in seen_hashes:
-                                        print(f"      ❌ ข้าม: Hash ซ้ำในระบบ"); seen_ids.add(t_id); count_skip += 1; continue
-                                
+                                    t_hash = extract_info_hash(r_dl.content) # แกะ Hash จากไฟล์ .torrent
+
+                                    # --- [ส่วนตรวจสอบไฟล์ซ้ำก่อนเพิ่มงานใหม่] ---
+                                    if t_hash:
+                                        # 1. เช็คจาก Cache ในหน่วยความจำของบอทก่อน
+                                        if t_hash in seen_hashes:
+                                            print(f"      ❌ ข้าม: Hash ซ้ำในระบบ (Seen Cache)")
+                                            seen_ids.add(t_id); count_skip += 1; continue
+
+                                        # 2. เช็คจากไฟล์ที่รันอยู่จริงในทุกลูกข่าย (Node) ที่ออนไลน์อยู่
+                                        is_dup_on_client = False
+
+                                        # วนลูปตาม active_nodes ที่คุณ append ไว้: (node, n_cfg)
+                                        for node_obj, _ in active_nodes:
+                                            # ใช้ข้อมูลล่าสุดที่เพิ่ง refresh มาจากลูปหลัก
+                                            is_dup, reason = is_file_already_on_node(node_obj, t_name, t_hash)
+
+                                            if is_dup:
+                                                print(f"      ❌ ข้าม: พบไฟล์บน [{node_obj.name}] แล้ว ({reason})")
+                                                is_dup_on_client = True
+                                                break
+
+                                        if is_dup_on_client:
+                                            seen_ids.add(t_id); seen_hashes.add(t_hash)
+                                            count_skip += 1; continue
+
                                     # กดขอบคุณ
                                     page.evaluate(f"sndReq('action=say_thanks&id={t_id}', 'saythanks')")
                                 
