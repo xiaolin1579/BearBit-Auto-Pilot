@@ -174,7 +174,7 @@ def get_historical_report():
 
         if not history: return "⚠️ ข้อมูลว่างเปล่า"
 
-        now = datetime.now()
+        now = get_now()
         today_str = now.strftime("%Y-%m-%d")
 
         # กรองข้อมูลของวันนี้ (รองรับทั้งโครงสร้าง Flat และ Nested)
@@ -185,13 +185,13 @@ def get_historical_report():
             return f"📊 ยังไม่มีข้อมูลของวันนี้ ({today_str})"
 
         # ดึง Snapshot แรกและล่าสุด
-        first_snapshot = history[today_keys[0]]['data']
-        latest_snapshot = history[today_keys[-1]]['data']
+        first_snapshot = history[today_keys[0]]
+        latest_snapshot = history[today_keys[-1]]
 
         # ข้อมูลย้อนหลัง 1 ชม.
         target_h1 = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
         h1_key = next((k for k in reversed(today_keys) if k <= target_h1), None)
-        h1_snapshot = history.get(h1_key, {}).get('data') if h1_key else None
+        h1_snapshot = history.get(h1_key, {}) if h1_key else None
 
         # ฟังก์ชันคำนวณส่วนต่างจากเลข Float (GB)
         def calc_gain(new_val, old_val):
@@ -248,8 +248,8 @@ def get_monthly_report():
             return f"📊 ข้อมูลของเดือน {current_month} ยังไม่เพียงพอสำหรับสรุปยอด"
 
         # ดึงข้อมูลตัวแรกของเดือน และตัวล่าสุดของเดือน
-        first_data = history[monthly_keys[0]]['data']
-        last_data = history[monthly_keys[-1]]['data']
+        first_data = history[monthly_keys[0]]
+        last_data = history[monthly_keys[-1]]
 
         # คำนวณส่วนต่าง (ใช้คีย์ 'up' และ 'bonus' ที่เป็นตัวเลขได้เลย)
         up_gain = last_data['up'] - first_data['up']

@@ -851,10 +851,12 @@ def save_hourly_snapshot(current_data):
         # ใช้ Key แบบรายชั่วโมง (เช่น "2026-04-29 10:00")
         # เพื่อให้สถิติ 1 ชั่วโมงมีแค่ 1 Snapshopt ที่เป็นค่าล่าสุด
         timestamp_key = now.strftime("%Y-%m-%d %H:00")
-
+        
         history[timestamp_key] = {
-            'upload': current_data.get('upload', 0),
-            'download': current_data.get('download', 0),
+            'username': current_data.get('username', 'N/A'),
+            'ratio': current_data.get('ratio', 0),
+            'up': current_data.get('up', 0),
+            'dl': current_data.get('dl', 0),
             'bonus': current_data.get('bonus', 0),
             'raw_time': now.strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -1119,25 +1121,32 @@ def get_node_dynamic_cap(node, disk_type):
         'SSD': 6,
         'HDD': 4       # HDD ต้องระวัง ถ้าเริ่มหน่วงให้รีบลด Cap ทันทีป้องกัน Disk ค้าง
     }
-    # --- [เพิ่ม] ระบบตรวจสอบโควตาพื้นที่คงเหลือ (Free Space Weight) ---
+    # --- [เพิ่ม] ระบบตรวจสอบโควตาพื้นที่คงเหลือ (Dynamic Space Scaler) ---
     free_gb = node.free_gb
+    
+    # กำหนดค่าตัวคูณพื้นที่ (เพิ่มเมื่อว่าง / ลดเมื่อเต็ม)
+    if free_gb > 1500:        # มากกว่า 1.5 TB
+        space_factor = 2.5    # ขยายเป็น 2.5 เท่า (สายโหด)
+    elif free_gb > 1000:      # มากกว่า 1.0 TB
+        space_factor = 2.0    # ขยายเป็น 2 เท่า
+    elif free_gb > 500:       # มากกว่า 500 GB
+        space_factor = 1.5    # ขยายเป็น 1.5 เท่า
+    elif free_gb < 20:        # น้อยกว่า 20 GB
+        space_factor = 0.1    # แทบจะปิดรับงาน
+    elif free_gb < 100:       # น้อยกว่า 100 GB
+        space_factor = 0.5    # รับงานครึ่งเดียว
+    else:
+        space_factor = 1.0    # ช่วง 100-500 GB รับตามปกติ
 
-    # ถ้าพื้นที่เหลือน้อยกว่า 100GB ให้ลด Cap ลงอย่างรวดเร็ว
-    # ถ้าพื้นที่เหลือน้อยกว่า 20GB ให้ Cap เป็น 0 หรือ 1 ทันที
-    space_factor = 1.0
-    if free_gb < 20:
-        space_factor = 0.1  # แทบจะปิดรับงานใหม่
-    elif free_gb < 100:
-        space_factor = 0.5  # รับงานได้ครึ่งเดียวของปกติ
-
-    # คำนวณ Cap เดิมที่อิงจาก Latency
+    # คำนวณ Cap พื้นฐานจาก Latency ก่อน
     reduction = reductions.get(disk_type, 6)
     latency_cap = int(base / (1 + (proxy_wait / reduction)))
 
     # --- [Final Cap] รวมปัจจัยความหน่วง + พื้นที่คงเหลือ ---
-    dynamic_cap = max(1, int(latency_cap * space_factor))
+    # ใช้ค่าน้ำหนักงานรวม (Weight Cap) แทนจำนวนไฟล์
+    dynamic_weight_cap = max(2, int(latency_cap * space_factor))
 
-    return dynamic_cap, proxy_wait
+    return dynamic_weight_cap, proxy_wait
 
 def get_node_current_weight(node):
     """คำนวณน้ำหนักงานปัจจุบันที่กำลัง 'เขียนดิสก์' (Downloading)"""
