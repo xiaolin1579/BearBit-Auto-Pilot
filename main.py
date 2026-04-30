@@ -280,23 +280,27 @@ class QbitNode:
     def add(self, content, size=None, n_cfg=None):
         try:
             if len(content) < 1000: return False
-            
-            # เตรียมข้อมูลส่ง
-            files = {"torrents": ("f.torrent", content)}
+
+            files = {"torrents": ("f.torrent", content, "application/x-bittorrent")}
             data = {
                 "paused": "false",
                 "firstLastPiecePrio": "true",
-                "category": "BearBit-Auto", # แยกหมวดหมู่ให้ชัดเจน
+                "category": "BearBit-Auto",
                 "tags": "AutoPilot"
             }
-            
-            r = self.s.post(f"{self.url}/api/v2/torrents/add", files=files, data=data, timeout=30)
-            
-            # qBit จะตอบ 'Ok.' กลับมาใน text ถ้าสำเร็จ
-            return r.status_code == 200 and r.text == "Ok."
-        except:
+
+            r = self.s.post(f"{self.url}/api/v2/torrents/add", files=files, data=data, auth=self.auth, verify=False, timeout=30)
+
+            if r.status_code == 200 and "Ok" in r.text:
+                return True
+            else:
+                # พ่น Error จากฝั่ง Server เมื่อ API ตอบกลับแต่ไม่ใช่ Ok
+                print(f"⚠️ [API Error] {self.url}: {r.status_code} - {r.text}")
+                return False
+        except Exception as e:
+            # พ่น Error เมื่อเกิดปัญหาที่ตัวบอทเอง (เช่น Timeout หรือ Connection Error)
+            print(f"❌ [Exception] {self.url}: {str(e)}")
             return False
-            
 
     def get_all_torrents_info(self):
         try:
@@ -343,7 +347,7 @@ class QbitNode:
             results = []
             # ใช้การวน Loop ดึงทั้ง downloading และ checking
             for filter_type in ['downloading', 'checking']:
-                r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': filter_type}, auth=self.auth, timeout=10, verify=False)
+                r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': filter_type}, auth=self.auth, verify=False, timeout=10, verify=False)
 
                 if r.status_code == 200 and r.text:
                     try:
@@ -370,7 +374,7 @@ class QbitNode:
         if not self.is_connected and not self.login(): return False
         try:
             # สั่ง reannounce ทุก hashes โดยส่งค่า 'all'
-            r = self.s.post(f"{self.url}/api/v2/torrents/reannounce", data={"hashes": "all"}, auth=self.auth, timeout=10)
+            r = self.s.post(f"{self.url}/api/v2/torrents/reannounce", data={"hashes": "all"}, auth=self.auth, verify=False, timeout=10)
             return r.status_code == 200
         except: return False
 
@@ -958,33 +962,42 @@ def get_bearbit_stats(page):
         else:
             username = "Unknown"
 
-        # --- 2. เช็คไอเทมและเวลาหมดอายุ ---
-        text_content = soup.get_text(separator=" ", strip=True)
+        # --- 2. เช็คไอเทมและเวลาหมดอายุ (เวอร์ชันแก้ไขเสถียรภาพ) ---
         active_item = "NONE"
+        raw_exp = "N/A"
+        display_exp = "N/A"
 
-        if any(x in text_content for x in ["Free Download 100%", "ฟรีโหลด 100%"]):
-            active_item = "FREELOAD_100"
-        elif any(x in text_content for x in ["Free Download 50%", "ฟรีโหลด 50%", "ตุ๊กตาซานต้า"]):
-            active_item = "FREELOAD_50"
-        elif any(x in text_content for x in ["Free Download 15%", "ฟรีโหลด 15%", "หยินหยางนำโชค"]):
-            active_item = "FREELOAD_15"
-        elif any(x in text_content for x in ["Free Download 10%", "ฟรีโหลด 10%", "แหวนครองพิภพ"]):
-            active_item = "FREELOAD_10"
+        # เจาะจงหาแถวที่มีข้อมูลไอเทม เพื่อไม่ให้ไปดึง "เวลาสมัครสมาชิก" มาผิด
+        item_row = soup.find("td", string=re.compile(r"Item Status|หมดอายุ Item"))
+        if item_row:
+            # ดึงข้อมูลจากช่อง <td> ถัดไป
+            full_text = item_row.find_next_sibling("td").get_text(strip=True)
 
-        # ดึงเวลาแบบดิบ (Raw) เพื่อเอาไปใช้คำนวณ Urgency
-        exp_match = re.search(r"(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})", text_content)
-        raw_exp = exp_match.group(1) if exp_match else "N/A"
+            # ตรวจสอบประเภทไอเทม
+            if any(x in full_text for x in ["ซานตาคลอส", "100%"]):
+                active_item = "FREELOAD_100"
+            elif any(x in full_text for x in ["ตุ๊กตาซานต้า", "50%"]):
+                active_item = "FREELOAD_50"
+            elif any(x in full_text for x in ["หยินหยาง", "15%"]):
+                active_item = "FREELOAD_15"
+            elif any(x in full_text for x in ["แหวนครองพิภพ", "10%"]):
+                active_item = "FREELOAD_10"
 
-        # จัดฟอร์แมตสำหรับแสดงผล (เช่น 20:30)
-        display_exp = raw_exp
-        if display_exp != "N/A" and " " in display_exp:
-            display_exp = display_exp.split(" ")[1][:5]
-        elif display_exp != "N/A":
-            display_exp = display_exp[:5]
+            # Regex แบบยืดหยุ่นสูง:
+            # \d{2}-\d{2}-\d{4} คือ วัน-เดือน-ปี
+            # \s+ คือ ช่องว่าง (รองรับทั้ง Space ปกติ และตัวอักษรพิเศษ)
+            # \d{2}:\d{2}:\d{2} คือ ชม:นาที:วินาที
+            exp_match = re.search(r"(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})", full_text)
+            if exp_match:
+                raw_exp = exp_match.group(1)
+                parts = re.split(r'\s+', raw_exp.strip())
+                if len(parts) >= 2:
+                    display_exp = f"{parts[0]} / {parts[1][:5]}"
 
-        # จัดการแสดงผล Item ตามเงื่อนไขที่คุณต้องการ (โชว์เวลาเฉพาะตอนมีไอเทม)
+        # จัดการแสดงผล Item
         if active_item != "NONE":
             item_display = f"<b>{active_item}</b> ({display_exp})"
+            # แจ้งเตือนถ้าใกล้หมดเวลา (เช็คจาก raw_exp ที่ดึงมาใหม่)
             urgency_alert = "⚠️ <b>ใกล้หมดเวลา!</b>\n" if check_item_urgency(raw_exp) else ""
         else:
             item_display = "NONE"
@@ -1009,7 +1022,7 @@ def get_bearbit_stats(page):
             }
             diff_text = get_stats_diff(curr_data)
 
-            # บันทึก Snapshot ลงไฟล์ JSON
+            # บันทึก Snapshot ลงไฟล์ JSON (ใช้คีย์สั้น 'up', 'dl' ตามที่คุณระบุ)
             numeric_data = {
                 'username': username,
                 'ratio': float(curr_data['ratio'].replace(',', '')),
@@ -1021,18 +1034,18 @@ def get_bearbit_stats(page):
 
             # จัดรูปแบบข้อความส่ง Telegram
             stats_msg = (
-                f"📊 <b>BearBit Status Report</b>\n"
                 f"👤 <b>{username}</b> | Ratio: {ratio.group(1)}\n"
                 f"📤 Up: {up.group(1)} | 📥 Dl: {dl.group(1)}\n"
                 f"💰 Bonus: {curr_data['bonus']} | 🎁 Item: {item_display}\n"
                 f"{urgency_alert + '\n' if urgency_alert else ''}"
-                f"{'🔄 ' + diff_text if diff_text else ''}" # ต่อกันเป็นบรรทัดเดียว
+                f"{'🔄 ' + diff_text if diff_text else ''}"
             )
             return stats_msg
 
         return "⚠️ ไม่สามารถดึงสถิติได้"
 
     except Exception as e:
+        # หากเกิด Error จะแจ้งรายละเอียดเพื่อช่วย Debug
         return f"⚠️ Stats Error: {str(e)}"
 
 def update_bot_config(active_item):
