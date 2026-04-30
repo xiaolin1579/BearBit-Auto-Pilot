@@ -347,7 +347,7 @@ class QbitNode:
             results = []
             # ใช้การวน Loop ดึงทั้ง downloading และ checking
             for filter_type in ['downloading', 'checking']:
-                r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': filter_type}, auth=self.auth, verify=False, timeout=10, verify=False)
+                r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'filter': filter_type}, auth=self.auth, verify=False, timeout=10)
 
                 if r.status_code == 200 and r.text:
                     try:
@@ -1134,22 +1134,30 @@ def get_node_dynamic_cap(node, disk_type):
         'SSD': 6,
         'HDD': 4       # HDD ต้องระวัง ถ้าเริ่มหน่วงให้รีบลด Cap ทันทีป้องกัน Disk ค้าง
     }
-    # --- [เพิ่ม] ระบบตรวจสอบโควตาพื้นที่คงเหลือ (Dynamic Space Scaler) ---
+
+    # --- [ปรับปรุง] ระบบตรวจสอบโควตาพื้นที่คงเหลือ (Dynamic Space Scaler - 10% Reserve) ---
+    quota = node.quota_gb if node.quota_gb > 0 else 1000  # ถ้าไม่มีโควตาให้ Assume ที่ 1TB
     free_gb = node.free_gb
-    
-    # กำหนดค่าตัวคูณพื้นที่ (เพิ่มเมื่อว่าง / ลดเมื่อเต็ม)
-    if free_gb > 1500:        # มากกว่า 1.5 TB
-        space_factor = 2.5    # ขยายเป็น 2.5 เท่า (สายโหด)
-    elif free_gb > 1000:      # มากกว่า 1.0 TB
-        space_factor = 2.0    # ขยายเป็น 2 เท่า
-    elif free_gb > 500:       # มากกว่า 500 GB
-        space_factor = 1.5    # ขยายเป็น 1.5 เท่า
-    elif free_gb < 20:        # น้อยกว่า 20 GB
-        space_factor = 0.1    # แทบจะปิดรับงาน
-    elif free_gb < 100:       # น้อยกว่า 100 GB
-        space_factor = 0.5    # รับงานครึ่งเดียว
-    else:
-        space_factor = 1.0    # ช่วง 100-500 GB รับตามปกติ
+
+    # คำนวณเปอร์เซ็นต์พื้นที่ว่างที่เหลืออยู่เมื่อเทียบกับโควตา
+    free_percent = (free_gb / quota) * 100
+
+    # ระบบค่อยๆ ลดระดับการรับงาน (Step-down Scaling)
+    if free_percent > 85:          # โซนว่างมาก (เช่น Swizzin ปัจจุบัน)
+        space_factor = 5.0         # อัดฉีดเต็มสูบเพื่อรีดประสิทธิภาพ
+    elif free_percent > 70:        # ลดระดับที่ 1 (-15%)
+        space_factor = 4.0
+    elif free_percent > 55:        # ลดระดับที่ 2 (-15%)
+        space_factor = 3.0
+    elif free_percent > 40:        # ลดระดับที่ 3 (-15%)
+        space_factor = 2.0
+    elif free_percent > 25:        # ลดระดับที่ 4 (-15%)
+        space_factor = 1.0         # เริ่มกลับสู่โหมดทำงานปกติ
+    elif free_percent > 10:        # โซนเตรียมหยุด (เหลือ 10-25%)
+        space_factor = 0.5         # รับเฉพาะงานเล็กประคองตัว
+    else:                          # ต่ำกว่า 10% (Safety Zone)
+        space_factor = 0.0         # ปิดการรับงานทันทีเพื่อรักษาพื้นที่สำรอง
+        print(f"🛑 [{node.name}] Safety Stop: Reserved 10% reached. All new tasks blocked.")
 
     # คำนวณ Cap พื้นฐานจาก Latency ก่อน
     reduction = reductions.get(disk_type, 6)
