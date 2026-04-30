@@ -322,6 +322,14 @@ class QbitNode:
             return []
         except: return []
 
+    def is_torrent_exists(self, t_hash):
+        if not self.is_connected: self.login()
+        try:
+            # ตรวจสอบจาก hash โดยตรงผ่าน API ของ qBittorrent
+            r = self.s.get(f"{self.url}/api/v2/torrents/info", params={'hashes': t_hash}, auth=self.auth, timeout=10)
+            return r.status_code == 200 and len(r.json()) > 0
+        except: return False
+
     def delete_torrent(self, hash_str):
         try:
             self.s.post(f"{self.url}/api/v2/torrents/delete", data={"hashes": hash_str, "deleteFiles": "true"}, auth=self.auth, verify=False, timeout=10)
@@ -479,6 +487,16 @@ class RtorrentNode:
         except Exception as e:
             print(f"❌ rTorrent Reclaim Error: {e}")
             return []
+
+    def is_torrent_exists(self, t_hash):
+        if not self.is_connected: self.login()
+        try:
+            # ใช้ XML-RPC ตรวจสอบชื่อไฟล์หรือ hash (ในที่นี้ใช้ hash ซึ่งแม่นยำที่สุด)
+            xml = f'<?xml version="1.0"?><methodCall><methodName>d.name</methodName><params><param><value><string>{t_hash.upper()}</string></value></param></params></methodCall>'
+            r = requests.post(self.url, data=xml, auth=self.auth, headers=self.headers, timeout=10, verify=False)
+            # ถ้า rTorrent คืนค่าสำเร็จ (ไม่ error) แสดงว่ามีไฟล์อยู่
+            return r.status_code == 200 and "<fault>" not in r.text
+        except: return False
 
     def get_downloading_size(self):
         """ดึงขนาดไฟล์ที่กำลังโหลดค้างอยู่ (Bytes ที่เหลือ)"""
@@ -1419,6 +1437,20 @@ def main():
                                     if t_hash and t_hash in seen_hashes:
                                         print(f"      ❌ ข้าม: Hash ซ้ำในระบบ"); seen_ids.add(t_id); count_skip += 1; continue
                                 
+                                    is_already_in_node = False
+                                    for node_obj, _ in active_nodes:
+                                        if node_obj.is_torrent_exists(t_hash):
+                                            print(f"      ❌ ข้าม: พบไฟล์ใน {node_obj.name} แล้ว (Manual Add Detection)")
+                                            is_already_in_node = True
+                                            break
+
+                                    if is_already_in_node:
+                                        # บันทึกลงประวัติบอทด้วยเลย จะได้ไม่ต้องเช็ค Node ในรอบหน้า
+                                        seen_ids.add(t_id)
+                                        if t_hash: seen_hashes.add(t_hash)
+                                        count_skip += 1
+                                        continue
+
                                     # กดขอบคุณ
                                     page.evaluate(f"sndReq('action=say_thanks&id={t_id}', 'saythanks')")
                                 
